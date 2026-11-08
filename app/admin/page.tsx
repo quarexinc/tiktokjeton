@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { adminKeyConfigured, isAdmin } from "@/lib/auth";
-import { readDB } from "@/lib/store";
+import { readDB, storageKind } from "@/lib/store";
 import Login from "@/components/admin/Login";
 import Dashboard from "@/components/admin/Dashboard";
 
@@ -14,13 +14,16 @@ export default async function AdminPage() {
   if (!(await isAdmin())) {
     return <Login configured={adminKeyConfigured()} />;
   }
-  let storageError: string | null = null;
+  let storageError: string | null =
+    storageKind() === "none"
+      ? "Depolama bağlı değil, eklediğin yayınlar kaydedilemez. Vercel projesinde Storage sekmesinden Upstash Redis bağla ve yeniden yayınla."
+      : null;
   let db;
   try {
     db = await readDB();
   } catch (e) {
     console.error(e);
-    storageError = "Depolamaya ulaşılamadı. Vercel Blob bağlantısını kontrol et.";
+    storageError = "Depolamaya ulaşılamadı. Vercel projesindeki Storage bağlantısını kontrol et.";
     db = { streams: [], settings: { announcement: "", showPast: true, pastLimit: 24 } };
   }
   return <Dashboard initial={{ ...db, now: Date.now() }} storageError={storageError} />;

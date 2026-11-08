@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { safe } from "@/lib/http";
 import { isAdmin } from "@/lib/auth";
 import { mutateDB, readDB } from "@/lib/store";
 import { parseStreamInput } from "@/lib/validate";
@@ -16,6 +17,7 @@ type Ctx = { params: Promise<{ id: string }> };
  *  - diğer alanlar                  düzenleme
  */
 export async function PATCH(req: Request, { params }: Ctx) {
+  return safe(async () => {
   if (!(await isAdmin())) return NextResponse.json({ error: "Giriş gerekli." }, { status: 401 });
   const { id } = await params;
   const body = await req.json().catch(() => ({}));
@@ -63,13 +65,16 @@ export async function PATCH(req: Request, { params }: Ctx) {
 
   if (error) return NextResponse.json({ error }, { status: 400 });
   return NextResponse.json({ ...db, now: Date.now() });
+  });
 }
 
 export async function DELETE(_req: Request, { params }: Ctx) {
+  return safe(async () => {
   if (!(await isAdmin())) return NextResponse.json({ error: "Giriş gerekli." }, { status: 401 });
   const { id } = await params;
   const db = await mutateDB((db) => {
     db.streams = db.streams.filter((s) => s.id !== id);
   });
   return NextResponse.json({ ...db, now: Date.now() });
+  });
 }

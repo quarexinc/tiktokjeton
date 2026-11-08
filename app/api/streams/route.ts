@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { safe } from "@/lib/http";
 import { randomUUID } from "crypto";
 import { isAdmin } from "@/lib/auth";
 import { mutateDB, readDB } from "@/lib/store";
@@ -9,6 +10,7 @@ export const dynamic = "force-dynamic";
 
 /** Herkese açık: ana sayfanın yenilenmesi için. ?all=1 ile admin tüm veriyi alır. */
 export async function GET(req: Request) {
+  return safe(async () => {
   const all = new URL(req.url).searchParams.get("all") === "1";
   if (all) {
     if (!(await isAdmin())) return NextResponse.json({ error: "Giriş gerekli." }, { status: 401 });
@@ -17,9 +19,11 @@ export async function GET(req: Request) {
   }
   const payload = await getPublicPayload();
   return NextResponse.json(payload, { headers: { "Cache-Control": "no-store" } });
+  });
 }
 
 export async function POST(req: Request) {
+  return safe(async () => {
   if (!(await isAdmin())) return NextResponse.json({ error: "Giriş gerekli." }, { status: 401 });
   const body = await req.json().catch(() => ({}));
   const parsed = parseStreamInput(body);
@@ -34,4 +38,5 @@ export async function POST(req: Request) {
     });
   });
   return NextResponse.json({ ...db, now: Date.now() });
+  });
 }
