@@ -1,0 +1,135 @@
+@import "tailwindcss";
+@import "@fontsource-variable/bricolage-grotesque";
+@import "@fontsource-variable/figtree";
+
+@theme {
+  --color-ink: #170c24;
+  --color-ink-2: #211433;
+  --color-ink-3: #2c1b42;
+  --color-line: #3b2853;
+  --color-gold: #f7c948;
+  --color-gold-soft: #ffe08a;
+  --color-gold-deep: #b9800f;
+  --color-live: #ff3b6b;
+  --color-cyan: #3fe6e0;
+  --color-text: #f4eefa;
+  --color-muted: #a898bd;
+
+  --font-display: "Bricolage Grotesque Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Figtree Variable", ui-sans-serif, system-ui, sans-serif;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html {
+  background: var(--color-ink);
+}
+
+body {
+  background: var(--color-ink);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  min-height: 100dvh;
+}
+
+::selection {
+  background: var(--color-gold);
+  color: var(--color-ink);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-cyan);
+  outline-offset: 3px;
+  border-radius: 10px;
+}
+
+/* ---------- Jeton (3B dönen para) ---------- */
+.coin-stage {
+  perspective: 900px;
+}
+.coin {
+  position: relative;
+  width: var(--coin-size, 160px);
+  height: var(--coin-size, 160px);
+  transform-style: preserve-3d;
+  animation: coin-spin 4.2s linear infinite;
+}
+.coin.is-still {
+  animation: none;
+}
+.coin-face,
+.coin-edge {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  backface-visibility: hidden;
+}
+.coin-face.back {
+  transform: rotateY(180deg) translateZ(calc(var(--coin-depth, 12px) / 2));
+}
+.coin-face.front {
+  transform: translateZ(calc(var(--coin-depth, 12px) / 2));
+}
+.coin-edge {
+  backface-visibility: visible;
+  background: linear-gradient(90deg, #7a5208, #c8901a 30%, #ffe08a 50%, #c8901a 70%, #7a5208);
+}
+@keyframes coin-spin {
+  from { transform: rotateY(0deg); }
+  to { transform: rotateY(360deg); }
+}
+
+/* Canlı nabız */
+.live-dot {
+  position: relative;
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: var(--color-live);
+}
+.live-dot::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 9999px;
+  border: 2px solid var(--color-live);
+  animation: live-ping 1.6s ease-out infinite;
+}
+@keyframes live-ping {
+  0% { transform: scale(0.5); opacity: 0.9; }
+  100% { transform: scale(1.8); opacity: 0; }
+}
+
+/* Kalan süre çubuğu */
+.time-track {
+  height: 4px;
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--color-line) 80%, transparent);
+  overflow: hidden;
+}
+.time-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--color-live), var(--color-gold));
+  transition: width 1s linear;
+}
+
+.hero-glow {
+  background:
+    radial-gradient(42% 55% at 78% 40%, rgba(247, 201, 72, 0.18), transparent 70%);
+}
+
+.grain {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.05'/%3E%3C/svg%3E");
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .coin { animation: none; }
+  .live-dot::after { animation: none; opacity: 0; }
+  .time-fill { transition: none; }
+}
