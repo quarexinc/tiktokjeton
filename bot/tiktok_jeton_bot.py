@@ -45,7 +45,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import httpx
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 BASE_DIR = Path(__file__).resolve().parent
 
 # ----------------------------------------------------------------------------
@@ -473,30 +473,56 @@ def extract_notify_lead(event: Any) -> Optional[Tuple[int, int]]:
     return None
 
 
+def _room_of(v: Any) -> Optional[int]:
+    v = str(v or "")
+    return int(v) if v.isdigit() and v != "0" and len(v) >= 6 else None
+
+
 def extract_from_json(obj: Any, out: Optional[Dict[str, Optional[int]]] = None, depth: int = 0) -> Dict[str, Optional[int]]:
-    """TikTok'un JSON yanıtlarından (oda listeleri) yayıncı ve oda numarası toplar."""
+    """TikTok'un JSON verilerinden (oda listeleri, sayfa durumu) canlı yayıncı ve oda numarası toplar."""
     if out is None:
         out = {}
-    if depth > 10:
+    if depth > 14:
         return out
     if isinstance(obj, list):
         for x in obj:
             extract_from_json(x, out, depth + 1)
     elif isinstance(obj, dict):
-        owner = obj.get("owner")
-        room_id = obj.get("id_str") or obj.get("room_id_str") or obj.get("id")
-        if isinstance(owner, dict) and owner.get("display_id"):
-            u = clean_username(owner["display_id"])
-            if u and str(room_id or "").isdigit():
-                out[u] = int(room_id)
-        if obj.get("display_id") and isinstance(obj.get("own_room"), dict):
-            u = clean_username(obj["display_id"])
-            ids = obj["own_room"].get("room_ids_str") or obj["own_room"].get("room_ids") or []
-            if u and ids and str(ids[0]).isdigit():
-                out[u] = int(ids[0])
+        # Oda nesnesi: { id_str/roomId, owner: { display_id/uniqueId } }
+        owner = obj.get("owner") or obj.get("anchor")
+        if isinstance(owner, dict):
+            name = clean_username(owner.get("display_id") or owner.get("uniqueId") or owner.get("unique_id"))
+            room = _room_of(obj.get("id_str") or obj.get("roomId") or obj.get("room_id") or obj.get("id")) or _room_of(
+                owner.get("roomId") or owner.get("room_id")
+            )
+            if name and room:
+                out[name] = room
+        # Kullanıcı nesnesi: canlıyken roomId taşır
+        name = clean_username(obj.get("uniqueId") or obj.get("display_id") or "")
+        if name:
+            room = _room_of(obj.get("roomId") or obj.get("room_id"))
+            own = obj.get("own_room")
+            if not room and isinstance(own, dict):
+                ids = own.get("room_ids_str") or own.get("room_ids") or []
+                room = _room_of(ids[0]) if ids else None
+            if room:
+                out[name] = room
         for v in obj.values():
             if isinstance(v, (dict, list)):
                 extract_from_json(v, out, depth + 1)
+    return out
+
+
+_SCRIPT_JSON_RE = re.compile(r'<script[^>]*type="application/json"[^>]*>(.*?)</script>', re.S)
+
+
+def extract_from_html(html: str) -> Dict[str, Optional[int]]:
+    out: Dict[str, Optional[int]] = {}
+    for block in _SCRIPT_JSON_RE.findall(html or ""):
+        try:
+            extract_from_json(json.loads(block), out)
+        except ValueError:
+            continue
     return out
 
 
@@ -745,6 +771,7 @@ class Session:
 # ----------------------------------------------------------------------------
 
 FEED_URL = "https://webcast.tiktok.com/webcast/feed/"
+LIVE_PAGE_URL = "https://www.tiktok.com/live"
 
 
 class Bot:
@@ -849,30 +876,53 @@ class Bot:
                 self.pool.mark_hot(name, now + 600, now)
         self.pool.commit()
 
-    async def feed_discovery(self) -> None:
-        """Deneysel: TikTok'un canlı akışından tohum yayıncı çekmeyi dener."""
+    async def _try_live_page(self) -> Dict[str, Optional[int]]:
+        async with self._web_lock:
+            r = await self.web().get(url=LIVE_PAGE_URL, base_params=False)
+        if r.status_code != 200:
+            raise ValueError(f"HTTP {r.status_code}")
+        return extract_from_html(r.text)
+
+    async def _try_feed(self) -> Dict[str, Optional[int]]:
+        async with self._web_lock:
+            r = await self.web().get(
+                url=FEED_URL,
+                extra_params={"channel_id": "86", "content_type": "0", "req_from": "feed_loadmore", "max_time": "0"},
+                sign_url=True,
+            )
+        if r.status_code != 200:
+            raise ValueError(f"HTTP {r.status_code}")
+        return extract_from_json(r.json())
+
+    async def feed_discovery(self, loud: bool = False) -> int:
+        """TikTok'un canlı yayınlar sayfasından ve akışından tohum yayıncı toplar. Bulunan sayıyı döner."""
         if not self.cfg.feed_discovery or time.time() < self.feed_disabled_until:
-            return
-        try:
-            async with self._web_lock:
-                r = await self.web().get(
-                    url=FEED_URL,
-                    extra_params={"channel_id": "86", "content_type": "0", "req_from": "feed_loadmore", "max_time": "0"},
-                    sign_url=True,
-                )
-            found = extract_from_json(r.json())
-            if not found:
-                raise ValueError("akışta yayın yok")
+            return 0
+        total = 0
+        errors = []
+        for label, fn in (("canlı yayınlar sayfası", self._try_live_page), ("canlı akış", self._try_feed)):
+            try:
+                found = await fn()
+            except Exception as e:
+                errors.append(f"{label}: {type(e).__name__} {str(e)[:120]}")
+                continue
+            if found:
+                self.discovered(found, "akış")
+                total += len(found)
+                (log.info if loud else log.debug)(f"{label.capitalize()} üzerinden {len(found)} canlı yayın bulundu")
+            else:
+                errors.append(f"{label}: yayın verisi yok")
+        self.pool.commit()
+        if total:
             self.feed_fails = 0
-            self.discovered(found, "akış")
-            log.debug(f"Canlı akıştan {len(found)} yayın okundu")
-        except Exception as e:
-            self.feed_fails += 1
-            log.debug(f"Canlı akış okunamadı: {type(e).__name__}: {e}")
-            if self.feed_fails >= 3:
-                self.feed_disabled_until = time.time() + 6 * 3600
-                self.feed_fails = 0
-                log.info("Canlı akıştan keşif şu an çalışmıyor; 6 saat sonra tekrar denenecek. Keşif yayın içi verilerle sürüyor.")
+            return total
+        self.feed_fails += 1
+        (log.warning if loud else log.debug)("Tohum bulunamadı. " + "; ".join(errors))
+        if self.feed_fails >= 6:
+            self.feed_disabled_until = time.time() + 3 * 3600
+            self.feed_fails = 0
+            log.info("TikTok sayfalarından tohum çekilemiyor; 3 saat sonra tekrar denenecek.")
+        return 0
 
     # -- Oturumlar --
 
@@ -1036,20 +1086,26 @@ class Bot:
             await self._sleep(self.cfg.heartbeat_sec)
 
     async def discovery_loop(self) -> None:
+        await self._sleep(5)  # Önce siteden tohumlar gelsin
+        warned = False
         while not self.stopping.is_set():
+            wait = 600
             if self.cfg.discovery:
-                await self.feed_discovery()
+                empty = not self.sessions and self.pool.stats(time.time())["pool"] == 0
+                found = await self.feed_discovery(loud=empty)
                 removed = self.pool.prune(self.cfg.pool_max, time.time())
                 if removed:
                     log.debug(f"Havuzdan {removed} eski hesap silindi")
                 self.pool.commit()
-                # Havuz boşsa ve hiç bağlantı yoksa kullanıcıyı uyar
-                if not self.sessions and self.pool.stats(time.time())["pool"] == 0:
-                    log.warning(
-                        "Keşif havuzu boş. Bot ilk yayını bulamadı: sitede bir yayın ekle ya da Otomasyon > İzleme listesine "
-                        "1-2 canlı yayıncı yaz; bot oradan kendisi yayılır."
-                    )
-            await self._sleep(600)
+                if empty and not found:
+                    wait = 120
+                    if not warned:
+                        warned = True
+                        log.warning(
+                            "Keşif havuzu boş, bot 2 dakikada bir tohum aramaya devam edecek. Hızlandırmak için admin panelinde "
+                            "Otomasyon > Öncelikli hesaplar'a şu an canlı olan 1-2 TikTok hesabı yaz; bot oradan kendisi yayılır."
+                        )
+            await self._sleep(wait)
 
     async def status_loop(self) -> None:
         while not self.stopping.is_set():
