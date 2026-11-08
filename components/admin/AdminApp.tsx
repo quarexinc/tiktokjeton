@@ -86,7 +86,7 @@ export default function AdminApp({ initial, storageError }: { initial: AdminStat
           return null;
         }
         if (!r.ok) {
-          toast(j.error ?? "İşlem tamamlanamadı.", "err");
+          toast(j.error ?? `İşlem tamamlanamadı (sunucu yanıtı ${r.status}).`, "err");
           return null;
         }
         if (okText) toast(okText);
