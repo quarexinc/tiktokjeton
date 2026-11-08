@@ -9,3 +9,7 @@ next-env.d.ts
 .data
 bot/config.json
 __pycache__
+.venv
+logs
+kesif.db*
+DURDUR

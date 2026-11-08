@@ -148,5 +148,5 @@ export type Overview = {
   /** Son 14 günün günlük üye giriş sayıları, eskiden yeniye */
   loginsByDay: { day: string; count: number }[];
   clicksByDay: { day: string; count: number }[];
-  storage: "redis" | "blob" | "local" | "none";
+  storage: "neon" | "redis" | "blob" | "local" | "none";
 };

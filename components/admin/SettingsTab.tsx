@@ -7,6 +7,7 @@ import { Panel, Toggle, field } from "./ui";
 import type { DB, Settings } from "@/lib/types";
 
 const STORAGE_TEXT = {
+  neon: { label: "Neon Postgres bağlı", ok: true },
   redis: { label: "Upstash Redis bağlı", ok: true },
   blob: { label: "Vercel Blob bağlı", ok: true },
   local: { label: "Yerel dosya (geliştirme)", ok: true },
@@ -128,7 +129,7 @@ export default function SettingsTab() {
 
         <Panel title="Sistem" icon={Database}>
           <div className="divide-y divide-line">
-            <Row title="Depolama" desc={storage.ok ? "Yayınlar, anahtarlar ve istatistikler burada tutulur." : "Vercel projesinde Storage sekmesinden Upstash Redis bağla ve yeniden yayınla."}>
+            <Row title="Depolama" desc={storage.ok ? "Yayınlar, anahtarlar ve istatistikler burada tutulur." : "Vercel projesinde Storage sekmesinden Neon veritabanı bağla ve yeniden yayınla."}>
               <span className={`shrink-0 rounded-full px-3 py-1 text-[13px] font-semibold whitespace-nowrap ${storage.ok ? "bg-cyan/15 text-cyan" : "bg-live/15 text-live"}`}>{storage.label}</span>
             </Row>
             <Row title="Admin anahtarı" desc="Vercel proje ayarlarında ADMIN_KEY ortam değişkeninden değiştirilir.">

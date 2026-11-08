@@ -31,6 +31,7 @@ import { formatAgo } from "@/lib/status";
 import type { BotAdminView } from "@/lib/bot";
 
 const REPO_URL = "https://github.com/quarexinc/tiktokjeton/tree/main/bot";
+const ZIP_URL = "https://github.com/quarexinc/tiktokjeton/archive/refs/heads/main.zip";
 
 function clean(raw: string): string[] {
   const out = new Set<string>();
@@ -134,11 +135,6 @@ export default function BotTab() {
     return qq ? list.filter((u) => u.includes(qq)) : list;
   }, [list, q]);
 
-  const config = JSON.stringify(
-    { site_url: origin, api_key: token ?? "BURAYA_API_ANAHTARI", discovery: true, max_connections: 40, probe_seconds: 120 },
-    null,
-    2
-  );
 
   return (
     <div>
@@ -252,32 +248,46 @@ export default function BotTab() {
             </div>
           </Panel>
 
-          <Panel title="VDS kurulumu" icon={TerminalSquare}>
-            <ol className="space-y-4 text-[14px]">
+          <Panel title="Windows VDS kurulumu" icon={TerminalSquare}>
+            <ol className="space-y-4 text-[14px] leading-relaxed">
               <li className="flex gap-3">
                 <span className="grid size-6 shrink-0 place-items-center rounded-full bg-ink-3 text-[12px] font-bold">1</span>
                 <div className="min-w-0 flex-1">
-                  Ubuntu VDS'e bağlan ve botu indir:
-                  <pre className="mt-2 overflow-x-auto rounded-lg bg-ink p-3 text-[13px] leading-relaxed">{"git clone https://github.com/quarexinc/tiktokjeton.git\ncd tiktokjeton/bot\nsudo bash kur-linux.sh"}</pre>
+                  VDS&apos;e Uzak Masaüstü ile bağlan ve botu indir:{" "}
+                  <a href={ZIP_URL} target="_blank" rel="noopener noreferrer" className="font-semibold text-gold hover:underline">
+                    tiktokjeton-main.zip
+                  </a>
                 </div>
               </li>
               <li className="flex gap-3">
                 <span className="grid size-6 shrink-0 place-items-center rounded-full bg-ink-3 text-[12px] font-bold">2</span>
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center justify-between gap-2">
-                    <span>config.json dosyasını aç (nano config.json) ve şunları yaz:</span>
-                    <CopyBtn text={config} />
-                  </div>
-                  <pre className="mt-2 overflow-x-auto rounded-lg bg-ink p-3 text-[13px] leading-relaxed">{config}</pre>
+                  ZIP&apos;i aç, içindeki <b>bot</b> klasörünü <code className="rounded bg-ink px-1.5 py-0.5">C:\tiktokjeton</code> olarak kopyala.
                 </div>
               </li>
               <li className="flex gap-3">
                 <span className="grid size-6 shrink-0 place-items-center rounded-full bg-ink-3 text-[12px] font-bold">3</span>
                 <div className="min-w-0 flex-1">
-                  Kurulumu tekrar çalıştır. Bot servis olarak kurulur, sunucu yeniden başlasa da kendiliğinden açılır:
-                  <pre className="mt-2 overflow-x-auto rounded-lg bg-ink p-3 text-[13px]">sudo bash kur-linux.sh</pre>
+                  Yukarıdan bir API anahtarı oluştur ve kopyala.
+                </div>
+              </li>
+              <li className="flex gap-3">
+                <span className="grid size-6 shrink-0 place-items-center rounded-full bg-ink-3 text-[12px] font-bold">4</span>
+                <div className="min-w-0 flex-1">
+                  <b>KURULUM.bat</b> dosyasına sağ tıkla, <b>Yönetici olarak çalıştır</b> de. Python&apos;u, paketleri kurar, site adresini ve anahtarı sorar, bağlantıyı dener ve botu açılışta başlayan bir görev olarak kaydeder.
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <span className="text-muted">Site adresi:</span>
+                    <code className="rounded bg-ink px-2 py-1">{origin}</code>
+                    <CopyBtn text={origin} />
+                  </div>
+                </div>
+              </li>
+              <li className="flex gap-3">
+                <span className="grid size-6 shrink-0 place-items-center rounded-full bg-ink-3 text-[12px] font-bold">5</span>
+                <div className="min-w-0 flex-1">
+                  Birkaç dakika içinde bu sayfada bot <b>Çalışıyor</b> görünür. Kaydı izlemek için <b>DURUM.bat</b>, durdurmak için <b>DURDUR.bat</b>, yeni sürüm için <b>GUNCELLE.bat</b>.
                   <span className="mt-2 block text-muted">
-                    Windows VDS için baslat.bat ve windows-otomatik-baslat.bat dosyalarını kullan. Ayrıntılar{" "}
+                    Linux kurulumu ve tüm ayarlar{" "}
                     <a href={REPO_URL} target="_blank" rel="noopener noreferrer" className="font-semibold text-gold hover:underline">
                       bot klasöründeki README&apos;de
                     </a>

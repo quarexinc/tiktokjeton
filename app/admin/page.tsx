@@ -19,7 +19,7 @@ export default async function AdminPage() {
 
   let storageError: string | null =
     storageKind() === "none"
-      ? "Depolama bağlı değil: yayınlar ve anahtarlar kaydedilemez. Vercel'de tiktokjeton projesini aç, Storage sekmesinden Upstash Redis'i (ücretsiz) bağla ve projeyi yeniden yayınla."
+      ? "Depolama bağlı değil: yayınlar ve anahtarlar kaydedilemez. Vercel'de tiktokjeton projesini aç, Storage sekmesinden Neon veritabanını (ücretsiz) bağla ve projeyi yeniden yayınla."
       : null;
 
   let state: AdminState;

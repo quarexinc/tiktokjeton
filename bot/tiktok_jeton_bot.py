@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import logging
 import logging.handlers
 import os
@@ -44,7 +45,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import httpx
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 BASE_DIR = Path(__file__).resolve().parent
 
 # ----------------------------------------------------------------------------
@@ -258,8 +259,29 @@ class Pool:
                 pinned INTEGER DEFAULT 0
             )"""
         )
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(accounts)")}
+        if "hot_until" not in cols:
+            self.db.execute("ALTER TABLE accounts ADD COLUMN hot_until REAL DEFAULT 0")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_next ON accounts(next_check)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS anchors (user_id TEXT PRIMARY KEY, username TEXT, ts REAL)")
         self.db.commit()
+
+    def anchor_name(self, user_id: int) -> Optional[str]:
+        r = self.db.execute("SELECT username FROM anchors WHERE user_id=?", (str(user_id),)).fetchone()
+        return r["username"] if r else None
+
+    def save_anchor(self, user_id: int, username: str, now: float) -> None:
+        self.db.execute(
+            "INSERT INTO anchors(user_id, username, ts) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, ts=excluded.ts",
+            (str(user_id), username, now),
+        )
+
+    def mark_hot(self, username: str, until: float, now: float) -> None:
+        """Sıcak ipucu: bir süre listenin en başına al."""
+        self.db.execute(
+            "UPDATE accounts SET hot_until=MAX(hot_until, ?), next_check=MIN(next_check, ?) WHERE username=?",
+            (until, now, username),
+        )
 
     def add(self, username: str, room_id: Optional[int | str], source: str, live_now: bool, now: float) -> bool:
         """Yeni hesap eklendiyse True döner."""
@@ -294,12 +316,13 @@ class Pool:
         rows = self.db.execute(
             """SELECT * FROM accounts WHERE next_check <= ?
                ORDER BY pinned DESC,
+                        (hot_until > ?) DESC,
                         (chest_hits > 0) DESC,
                         (room_id IS NOT NULL) DESC,
                         last_chest DESC,
                         last_live DESC
                LIMIT ?""",
-            (now, limit + len(exclude)),
+            (now, now, limit + len(exclude)),
         ).fetchall()
         return [r for r in rows if r["username"] not in exclude][:limit]
 
@@ -433,6 +456,21 @@ def extract_anchors(obj: Any, depth: int = 0, out: Optional[Dict[str, Optional[i
             continue
         extract_anchors(v, depth + 1, out)
     return out
+
+
+_ROOM_RE = re.compile(r"room_id=(\d{6,})|/room/(\d{6,})|[?&]id=(\d{15,})")
+
+
+def extract_notify_lead(event: Any) -> Optional[Tuple[int, int]]:
+    """Oda bildiriminden (yayıncı kimliği, oda no) çıkarır. Bildirimdeki 'user' hediye gönderen izleyicidir, yayıncı değil."""
+    notify = getattr(event, "notify", None) or event
+    anchor = getattr(notify, "to_anchor_id", 0) or 0
+    schema = str(getattr(notify, "schema", "") or "")
+    m = _ROOM_RE.search(schema)
+    room = int(next(g for g in m.groups() if g)) if m else 0
+    if anchor and room:
+        return int(anchor), room
+    return None
 
 
 def extract_from_json(obj: Any, out: Optional[Dict[str, Optional[int]]] = None, depth: int = 0) -> Dict[str, Optional[int]]:
@@ -583,6 +621,10 @@ class Session:
                 cls = getattr(ev, name, None)
                 if cls is not None:
                     client.add_listener(cls, self._discovery_handler(name, source))
+            for name in ("RoomNotifyEvent", "GiftBroadcastEvent"):
+                cls = getattr(ev, name, None)
+                if cls is not None:
+                    client.add_listener(cls, self._notify_handler)
 
         self.task = await client.start(room_id=self.room_id or None, fetch_room_info=False)
         self.opened_at = time.time()
@@ -605,6 +647,14 @@ class Session:
                 self.bot.discovered(found, source, via=self.username)
 
         return handler
+
+    async def _notify_handler(self, event: Any) -> None:
+        try:
+            lead = extract_notify_lead(event)
+        except Exception:
+            return
+        if lead:
+            self.bot.add_lead(*lead)
 
     def handle_envelope(self, event: Any) -> None:
         info = getattr(event, "envelope_info", None)
@@ -710,6 +760,7 @@ class Bot:
         self.pinned: Set[str] = set()
         self.seeds: Set[str] = set(cfg.seed_usernames)
         self.counters = {"probed": 0, "added": 0, "discovered": 0, "checks": 0, "check_errors": 0}
+        self.leads: Dict[int, int] = {}  # oda no -> yayıncı kimliği
         self.feed_disabled_until = 0.0
         self.feed_fails = 0
         self.tiktok_backoff_until = 0.0
@@ -759,6 +810,44 @@ class Bot:
         if new:
             self.counters["discovered"] += new
             log.debug(f"{new} yeni yayıncı keşfedildi ({source}{', @' + via if via else ''})")
+
+    def add_lead(self, anchor_id: int, room_id: int) -> None:
+        if len(self.leads) < 500:
+            self.leads[room_id] = anchor_id
+
+    async def process_leads(self, now: float) -> None:
+        """Oda bildirimlerinden gelen ipuçlarını doğrula ve en öne al."""
+        if not self.leads:
+            return
+        batch = list(self.leads.items())[:20]
+        for room, _ in batch:
+            self.leads.pop(room, None)
+        try:
+            alive = await self.rooms_alive([r for r, _ in batch])
+        except Exception as e:
+            log.debug(f"İpucu odaları kontrol edilemedi: {type(e).__name__}: {e}")
+            return
+        resolved = 0
+        for (room, anchor), ok in zip(batch, alive):
+            if not ok:
+                continue
+            name = self.pool.anchor_name(anchor)
+            if not name and resolved < 3:
+                try:
+                    async with self._web_lock:
+                        raw = await self.web().fetch_user_unique_id(anchor)
+                        await asyncio.sleep(random.uniform(0.8, 1.6))
+                    name = clean_username(raw)
+                    resolved += 1
+                    if name:
+                        self.pool.save_anchor(anchor, name, now)
+                except Exception as e:
+                    log.debug(f"Yayıncı kimliği çözülemedi ({anchor}): {type(e).__name__}")
+            if name:
+                if self.pool.add(name, room, "bildirim", True, now):
+                    self.counters["discovered"] += 1
+                self.pool.mark_hot(name, now + 600, now)
+        self.pool.commit()
 
     async def feed_discovery(self) -> None:
         """Deneysel: TikTok'un canlı akışından tohum yayıncı çekmeyi dener."""
@@ -857,6 +946,8 @@ class Bot:
 
         if now < self.tiktok_backoff_until:
             return
+        if self.cfg.discovery:
+            await self.process_leads(now)
         free = self.cfg.max_connections - len(self.sessions) - len(self.starting)
         if free <= 0:
             return

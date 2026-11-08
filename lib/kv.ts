@@ -1,20 +1,22 @@
 import "server-only";
 import { get, put } from "@vercel/blob";
+import { neon } from "@neondatabase/serverless";
 import { promises as fs } from "fs";
 import path from "path";
 
 /**
  * Küçük bir anahtar-değer katmanı.
+ *  0. Neon Postgres (DATABASE_URL / POSTGRES_URL) — önerilen
  *  1. Upstash Redis REST (KV_REST_API_URL/KV_REST_API_TOKEN veya UPSTASH_REDIS_REST_URL/UPSTASH_REDIS_REST_TOKEN)
  *  2. Vercel Blob (BLOB_READ_WRITE_TOKEN) — tüm veri tek JSON belgesinde
  *  3. Yerel dosya (sadece geliştirme)
  */
 
-export type StorageKind = "redis" | "blob" | "local" | "none";
+export type StorageKind = "neon" | "redis" | "blob" | "local" | "none";
 
 export class StorageMissingError extends Error {
   constructor() {
-    super("Depolama bağlı değil. Vercel projesine Upstash Redis bağlayıp yeniden yayınla.");
+    super("Depolama bağlı değil. Vercel projesine Neon veritabanı bağlayıp yeniden yayınla.");
     this.name = "StorageMissingError";
   }
 }
@@ -39,11 +41,119 @@ function redisConfig() {
   return url && token ? { url: url.replace(/\/$/, ""), token } : null;
 }
 
+export function neonUrl(): string | null {
+  return process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.NEON_DATABASE_URL || null;
+}
+
 export function storageKind(): StorageKind {
+  if (neonUrl()) return "neon";
   if (redisConfig()) return "redis";
   if (process.env.BLOB_READ_WRITE_TOKEN) return "blob";
   if (!process.env.VERCEL) return "local";
   return "none";
+}
+
+/* ------------------------------ Neon Postgres ------------------------------ */
+
+export type QueryFn = (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
+
+const SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS tj_kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS tj_hash (k TEXT NOT NULL, f TEXT NOT NULL, v TEXT NOT NULL, PRIMARY KEY (k, f))`,
+  `CREATE TABLE IF NOT EXISTS tj_list (id BIGSERIAL PRIMARY KEY, k TEXT NOT NULL, v TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS tj_list_k_id ON tj_list (k, id DESC)`,
+  `CREATE TABLE IF NOT EXISTS tj_counter (k TEXT PRIMARY KEY, n BIGINT NOT NULL, exp TIMESTAMPTZ NOT NULL)`,
+];
+
+export class PostgresKV implements KV {
+  private ready: Promise<void> | null = null;
+  constructor(private q: QueryFn) {}
+
+  private init(): Promise<void> {
+    if (!this.ready) {
+      this.ready = (async () => {
+        for (const stmt of SCHEMA) await this.q(stmt);
+      })().catch((e) => {
+        this.ready = null;
+        throw e;
+      });
+    }
+    return this.ready;
+  }
+
+  private async rows(text: string, params: unknown[] = []) {
+    await this.init();
+    return this.q(text, params);
+  }
+
+  async get(key: string) {
+    const r = await this.rows(`SELECT v FROM tj_kv WHERE k = $1`, [key]);
+    return r.length ? String(r[0].v) : null;
+  }
+  async set(key: string, value: string) {
+    await this.rows(`INSERT INTO tj_kv (k, v) VALUES ($1, $2) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v`, [key, value]);
+  }
+  async hget(key: string, field: string) {
+    const r = await this.rows(`SELECT v FROM tj_hash WHERE k = $1 AND f = $2`, [key, field]);
+    return r.length ? String(r[0].v) : null;
+  }
+  async hset(key: string, field: string, value: string) {
+    await this.rows(
+      `INSERT INTO tj_hash (k, f, v) VALUES ($1, $2, $3) ON CONFLICT (k, f) DO UPDATE SET v = EXCLUDED.v`,
+      [key, field, value]
+    );
+  }
+  async hdel(key: string, field: string) {
+    await this.rows(`DELETE FROM tj_hash WHERE k = $1 AND f = $2`, [key, field]);
+  }
+  async hgetall(key: string) {
+    const r = await this.rows(`SELECT f, v FROM tj_hash WHERE k = $1`, [key]);
+    const out: Record<string, string> = {};
+    for (const row of r) out[String(row.f)] = String(row.v);
+    return out;
+  }
+  async hincrby(key: string, field: string, by: number) {
+    const r = await this.rows(
+      `INSERT INTO tj_hash (k, f, v) VALUES ($1, $2, ($3::bigint)::text)
+       ON CONFLICT (k, f) DO UPDATE SET v = (tj_hash.v::bigint + $3::bigint)::text
+       RETURNING v`,
+      [key, field, by]
+    );
+    return Number(r[0]?.v ?? 0);
+  }
+  async lpushTrim(key: string, value: string, max: number) {
+    await this.rows(`INSERT INTO tj_list (k, v) VALUES ($1, $2)`, [key, value]);
+    // Her seferinde değil, ara ara kırp
+    if (Math.random() < 0.1) {
+      await this.rows(
+        `DELETE FROM tj_list WHERE k = $1 AND id < (
+           SELECT COALESCE(MIN(id), 0) FROM (SELECT id FROM tj_list WHERE k = $1 ORDER BY id DESC LIMIT $2) t)`,
+        [key, max]
+      );
+    }
+  }
+  async lrange(key: string, count: number) {
+    const r = await this.rows(`SELECT v FROM tj_list WHERE k = $1 ORDER BY id DESC LIMIT $2`, [key, count]);
+    return r.map((row) => String(row.v));
+  }
+  async incrTTL(key: string, ttlSec: number) {
+    const r = await this.rows(
+      `INSERT INTO tj_counter (k, n, exp) VALUES ($1, 1, now() + make_interval(secs => $2))
+       ON CONFLICT (k) DO UPDATE SET
+         n = CASE WHEN tj_counter.exp < now() THEN 1 ELSE tj_counter.n + 1 END,
+         exp = CASE WHEN tj_counter.exp < now() THEN EXCLUDED.exp ELSE tj_counter.exp END
+       RETURNING n`,
+      [key, ttlSec]
+    );
+    if (Math.random() < 0.02) await this.rows(`DELETE FROM tj_counter WHERE exp < now()`);
+    return Number(r[0]?.n ?? 0);
+  }
+}
+
+function neonKV(url: string): KV {
+  // Bağlantı havuzu gerektirmeyen HTTP sürücüsü: sunucusuz ortam için uygun
+  const sql = neon(url);
+  return new PostgresKV(async (text, params = []) => (await sql.query(text, params)) as Record<string, unknown>[]);
 }
 
 /* ------------------------------ Redis ------------------------------ */
@@ -273,7 +383,8 @@ let instance: KV | null = null;
 export function kv(): KV {
   if (instance) return instance;
   const kind = storageKind();
-  if (kind === "redis") {
+  if (kind === "neon") instance = neonKV(neonUrl()!);
+  else if (kind === "redis") {
     const c = redisConfig()!;
     instance = new RedisKV(c.url, c.token);
   } else if (kind === "blob") instance = blobKV();

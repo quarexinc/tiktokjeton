@@ -6,17 +6,18 @@ VDS üzerinde 7/24 çalışır, sandıklı TikTok canlı yayınlarını **kendis
 
 TikTok'ta tüm canlı yayınları listeleyen açık bir servis yok ve aynı anda yüz binlerce yayın var. Bu yüzden bot kartopu yöntemiyle yayılır:
 
-1. **Keşif:** Bağlandığı her yayında şu mesajları okur ve oradaki yayıncıları, açık oda numaralarıyla birlikte keşif havuzuna ekler:
+1. **Sıcak ipuçları:** TikTok, bölgedeki başka bir odada büyük hediye ya da etkinlik olunca bütün yayınlara "bu odaya katıl" bildirimi gönderir. Bot bu bildirimlerdeki odaları en öne alır; bunlar sandık çıkma ihtimali en yüksek yayınlardır.
+2. **Keşif:** Bağlandığı her yayında şu mesajları okur ve oradaki yayıncıları, açık oda numaralarıyla birlikte keşif havuzuna ekler:
    - PK/battle eşleşmeleri
    - Ortak yayın (co-host) listeleri
    - Saatlik sıralama listeleri
    - Banner'lar
 
    Bir yayından onlarca yeni yayıncı çıkar. Sıralamalar bölgesel olduğu için bot Türkiye yayınlarından başlarsa ağırlıklı olarak Türkiye'de kalır.
-2. **Doğrulama:** Havuzdaki hesapların açık olup olmadığını TikTok'un toplu oda kontrolüyle doğrular (tek istekte 20 oda).
-3. **Yoklama:** Canlı olanlara sırayla 2 dakika bağlanır ve sandık olup olmadığına bakar.
-4. **Tutma:** Sandık görürse yayını siteye ekler, sandıklar bitene kadar bağlı kalır ve jeton miktarını, sandık sayısını, geri sayımı günceller. Görmezse bağlantıyı kapatıp sıradakine geçer.
-5. **Öğrenme:** Sandık görülen hesaplar havuzda öne çıkar ve 6 dakikada bir yoklanır. Diğerleri 25 dakikada bir yoklanır.
+3. **Doğrulama:** Havuzdaki hesapların açık olup olmadığını TikTok'un toplu oda kontrolüyle doğrular (tek istekte 20 oda).
+4. **Yoklama:** Canlı olanlara sırayla 2 dakika bağlanır ve sandık olup olmadığına bakar.
+5. **Tutma:** Sandık görürse yayını siteye ekler, sandıklar bitene kadar bağlı kalır ve jeton miktarını, sandık sayısını, geri sayımı günceller. Görmezse bağlantıyı kapatıp sıradakine geçer.
+6. **Öğrenme:** Sandık görülen hesaplar havuzda öne çıkar ve 6 dakikada bir yoklanır. Diğerleri 25 dakikada bir yoklanır.
 
 Havuz `kesif.db` dosyasında saklanır; bot yeniden başlasa da öğrendiklerini unutmaz.
 
@@ -27,7 +28,31 @@ Havuz `kesif.db` dosyasında saklanır; bot yeniden başlasa da öğrendiklerini
 
 Hiçbiri yoksa kayıtta uyarı verir. O durumda izleme listesine canlı olan 1-2 hesap yazman yeter.
 
-## Linux VDS kurulumu (Ubuntu / Debian, önerilen)
+## Windows VDS kurulumu (önerilen)
+
+1. VDS'e Uzak Masaüstü ile bağlan.
+2. Botu indir: https://github.com/quarexinc/tiktokjeton/archive/refs/heads/main.zip
+3. ZIP'i aç. İçindeki `bot` klasörünü `C:\tiktokjeton` olarak kopyala. Yol kısa ve boşluksuz olsun.
+4. Sitenin admin panelinde **Otomasyon > Anahtar oluştur**'a bas ve anahtarı kopyala.
+5. `C:\tiktokjeton\KURULUM.bat` dosyasına sağ tıkla ve **Yönetici olarak çalıştır** de. Kurulum şunları kendisi yapar:
+   - Python yoksa indirip kurar.
+   - Paketleri kurar.
+   - Site adresini ve API anahtarını sorar.
+   - Siteye bağlantıyı dener.
+   - Botu Windows açılışında kendiliğinden başlayan bir görev olarak kaydedip başlatır.
+6. Admin panelinde Otomasyon sekmesinde birkaç dakika içinde **Çalışıyor** yazmalı.
+
+| Dosya | Ne yapar |
+| --- | --- |
+| `DURUM.bat` | Keşif özetini ve canlı kaydı gösterir |
+| `DURDUR.bat` | Botu durdurur |
+| `BASLAT.bat` | Botu yeniden başlatır |
+| `GUNCELLE.bat` | GitHub'dan son sürümü indirir; ayarları ve keşif havuzunu korur |
+| `PENCEREDE-CALISTIR.bat` | Sorun ararken botu ayrıntılı kayıtla görünür pencerede çalıştırır (önce `DURDUR.bat`) |
+
+Bot arka planda (oturum kapalıyken de) çalışır. Çökerse 15 saniye sonra, sunucu yeniden başlarsa 30 saniye sonra kendiliğinden açılır.
+
+## Linux VDS kurulumu
 
 ```bash
 git clone https://github.com/quarexinc/tiktokjeton.git
@@ -46,13 +71,6 @@ Bot artık sistem servisi olarak çalışır. Çökerse ya da sunucu yeniden ba�
 | Keşif özeti | `.venv/bin/python tiktok_jeton_bot.py --stats` |
 | Yeniden başlat | `sudo systemctl restart tiktokjeton-bot` |
 | Güncelle | `bash guncelle-linux.sh` |
-
-## Windows VDS kurulumu
-
-1. Python 3.10+ kur. Kurulumda **Add Python to PATH** ve **Install for all users** kutularını işaretle.
-2. Klasörü indir, `config.example.json` dosyasını `config.json` adıyla kopyala, `api_key` yapıştır.
-3. `baslat.bat` dosyasına çift tıkla. Bot çökerse 15 saniye sonra kendiliğinden yeniden başlar.
-4. Sunucu açılışında otomatik başlaması için `windows-otomatik-baslat.bat` dosyasına sağ tıklayıp **Yönetici olarak çalıştır** de.
 
 ## Ayarlar (config.json)
 
