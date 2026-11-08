@@ -51,7 +51,7 @@ export const POST = botRoute(async (req, bot) => {
       open.nextChestAt = nextChestAt;
       if (viewers !== null) open.viewers = viewers;
       open.botSeenAt = iso;
-      if (open.source === "bot" && title) open.title = title;
+      if (open.source === "bot") open.title = title || (chests === 0 ? "Sandıklar açıldı, yayın sürüyor" : open.title);
       // Ana sayfada en az defaultDurationMin daha kalsın
       const wantEnd = now + bot.defaultDurationMin * 60_000;
       if (wantEnd > endTime(open) && statusOf(open, now) === "live") {

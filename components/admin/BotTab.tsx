@@ -5,6 +5,8 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   Activity,
   Bot,
+  Gift,
+  Radar,
   Check,
   Copy,
   KeyRound,
@@ -133,7 +135,7 @@ export default function BotTab() {
   }, [list, q]);
 
   const config = JSON.stringify(
-    { site_url: origin, api_key: token ?? "BURAYA_API_ANAHTARI", extra_usernames: [], check_interval_sec: 120, max_connections: 25 },
+    { site_url: origin, api_key: token ?? "BURAYA_API_ANAHTARI", discovery: true, max_connections: 40, probe_seconds: 120 },
     null,
     2
   );
@@ -142,7 +144,7 @@ export default function BotTab() {
     <div>
       <PageHead
         title="Otomasyon"
-        desc="Python botu izleme listesindeki TikTok hesaplarını takip eder. Yayında sandık açılınca jeton miktarı ve linkiyle siteye kendisi ekler."
+        desc="Python botu VDS'te 7/24 çalışır, sandıklı TikTok yayınlarını kendisi keşfeder ve jeton miktarı ile linkiyle siteye ekler."
         action={
           <button
             onClick={save}
@@ -167,9 +169,25 @@ export default function BotTab() {
             {st?.host ? `, ${st.host}` : ""}
           </div>
         </div>
-        <Stat icon={Users} label="İzlenen hesap" value={online && st ? st.watching : list.length} hint={online ? "Botun takip ettiği" : "Listede kayıtlı"} tone="text-gold" />
-        <Stat icon={Radio} label="Şu an canlı" value={online && st ? st.live : "-"} hint="İzleme listesinden" tone="text-live" />
-        <Stat icon={Activity} label="Bağlı yayın" value={online && st ? st.connected : "-"} hint="Sandık dinlenen" tone="text-text" />
+        {online && st?.discovery ? (
+          <>
+            <Stat
+              icon={Radar}
+              label="Keşif havuzu"
+              value={(st.pool ?? 0).toLocaleString("tr-TR")}
+              hint={`Bugün ${(st.discoveredToday ?? 0).toLocaleString("tr-TR")} yeni yayıncı`}
+              tone="text-gold"
+            />
+            <Stat icon={Activity} label="Bağlı yayın" value={st.live} hint={`${st.probing ?? 0} yoklanıyor, ${st.holding ?? 0} sandıklı`} tone="text-live" />
+            <Stat icon={Gift} label="Sandık görülen" value={(st.chestAccounts ?? 0).toLocaleString("tr-TR")} hint="Öncelikli takip edilen hesap" tone="text-text" />
+          </>
+        ) : (
+          <>
+            <Stat icon={Users} label="İzlenen hesap" value={online && st ? st.watching : list.length} hint={online ? "Botun takip ettiği" : "Listede kayıtlı"} tone="text-gold" />
+            <Stat icon={Radio} label="Şu an canlı" value={online && st ? st.live : "-"} hint="Bağlı yayın" tone="text-live" />
+            <Stat icon={Activity} label="Bağlı yayın" value={online && st ? st.connected : "-"} hint="Sandık dinlenen" tone="text-text" />
+          </>
+        )}
       </div>
 
       <div className="mt-6 grid gap-6 xl:grid-cols-2">
@@ -234,41 +252,37 @@ export default function BotTab() {
             </div>
           </Panel>
 
-          <Panel title="Kurulum" icon={TerminalSquare}>
+          <Panel title="VDS kurulumu" icon={TerminalSquare}>
             <ol className="space-y-4 text-[14px]">
               <li className="flex gap-3">
                 <span className="grid size-6 shrink-0 place-items-center rounded-full bg-ink-3 text-[12px] font-bold">1</span>
-                <div>
-                  Bilgisayarına Python 3.10 ya da üstünü kur. Botun dosyaları{" "}
-                  <a href={REPO_URL} target="_blank" rel="noopener noreferrer" className="font-semibold text-gold hover:underline">
-                    GitHub&apos;daki bot klasöründe
-                  </a>
-                  .
+                <div className="min-w-0 flex-1">
+                  Ubuntu VDS'e bağlan ve botu indir:
+                  <pre className="mt-2 overflow-x-auto rounded-lg bg-ink p-3 text-[13px] leading-relaxed">{"git clone https://github.com/quarexinc/tiktokjeton.git\ncd tiktokjeton/bot\nsudo bash kur-linux.sh"}</pre>
                 </div>
               </li>
               <li className="flex gap-3">
                 <span className="grid size-6 shrink-0 place-items-center rounded-full bg-ink-3 text-[12px] font-bold">2</span>
                 <div className="min-w-0 flex-1">
-                  Klasörde paketleri kur:
-                  <pre className="mt-2 overflow-x-auto rounded-lg bg-ink p-3 text-[13px]">pip install -r requirements.txt</pre>
-                </div>
-              </li>
-              <li className="flex gap-3">
-                <span className="grid size-6 shrink-0 place-items-center rounded-full bg-ink-3 text-[12px] font-bold">3</span>
-                <div className="min-w-0 flex-1">
                   <div className="flex items-center justify-between gap-2">
-                    <span>config.json dosyasını şöyle doldur:</span>
+                    <span>config.json dosyasını aç (nano config.json) ve şunları yaz:</span>
                     <CopyBtn text={config} />
                   </div>
                   <pre className="mt-2 overflow-x-auto rounded-lg bg-ink p-3 text-[13px] leading-relaxed">{config}</pre>
                 </div>
               </li>
               <li className="flex gap-3">
-                <span className="grid size-6 shrink-0 place-items-center rounded-full bg-ink-3 text-[12px] font-bold">4</span>
+                <span className="grid size-6 shrink-0 place-items-center rounded-full bg-ink-3 text-[12px] font-bold">3</span>
                 <div className="min-w-0 flex-1">
-                  Botu başlat. Windows&apos;ta baslat.bat dosyasına çift tıklaman yeterli.
-                  <pre className="mt-2 overflow-x-auto rounded-lg bg-ink p-3 text-[13px]">python tiktok_jeton_bot.py</pre>
-                  <span className="mt-2 block text-muted">Bağlantıyı denemek için: python tiktok_jeton_bot.py --test</span>
+                  Kurulumu tekrar çalıştır. Bot servis olarak kurulur, sunucu yeniden başlasa da kendiliğinden açılır:
+                  <pre className="mt-2 overflow-x-auto rounded-lg bg-ink p-3 text-[13px]">sudo bash kur-linux.sh</pre>
+                  <span className="mt-2 block text-muted">
+                    Windows VDS için baslat.bat ve windows-otomatik-baslat.bat dosyalarını kullan. Ayrıntılar{" "}
+                    <a href={REPO_URL} target="_blank" rel="noopener noreferrer" className="font-semibold text-gold hover:underline">
+                      bot klasöründeki README&apos;de
+                    </a>
+                    .
+                  </span>
                 </div>
               </li>
             </ol>
@@ -276,12 +290,12 @@ export default function BotTab() {
         </div>
 
         <Panel
-          title="İzleme listesi"
+          title="Öncelikli hesaplar"
           icon={Bot}
           action={<span className="text-[13px] text-muted tabular-nums">{list.length} hesap</span>}
         >
           <p className="mb-4 text-[14px] text-muted">
-            Bot bu hesapların canlı yayına girip girmediğini düzenli kontrol eder. Yayındaysa bağlanıp sandıkları dinler. Liste her dakika bota iletilir, yeniden başlatman gerekmez.
+            İsteğe bağlı. Bot yayınları kendisi keşfeder; buraya yazdığın hesaplar ise her zaman öncelikli takip edilir ve yayındayken sürekli dinlenir. Keşfin başlaması için havuz boşsa buradaki hesaplar tohum olur.
           </p>
 
           {bulk ? (
@@ -374,7 +388,7 @@ export default function BotTab() {
             </ul>
           ) : (
             <p className="mt-4 rounded-xl border border-dashed border-line px-4 py-6 text-center text-[14px] text-muted">
-              Liste boş. Sandık dağıtan yayıncıların kullanıcı adlarını ekle.
+              Liste boş. Bot keşfi kendi yapıyor; sürekli takip etmesini istediğin hesap varsa ekle.
             </p>
           )}
           {dirty && <p className="mt-4 text-[13px] text-gold">Kaydedilmemiş değişiklik var. Sağ üstten kaydet.</p>}

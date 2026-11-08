@@ -42,7 +42,20 @@ export type BotConfig = {
   /** Botun takip edeceği TikTok kullanıcı adları */
   watchlist: string[];
   lastSeenAt: string | null;
-  lastStatus: { watching: number; live: number; connected: number; version: string; host: string } | null;
+  lastStatus: {
+    watching: number;
+    live: number;
+    connected: number;
+    version: string;
+    host: string;
+    /** Keşif modu (bot 2.x) */
+    discovery?: boolean;
+    pool?: number;
+    probing?: number;
+    holding?: number;
+    chestAccounts?: number;
+    discoveredToday?: number;
+  } | null;
 };
 
 export const DEFAULT_BOT: BotConfig = {

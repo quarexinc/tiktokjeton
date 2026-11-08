@@ -1,16 +1,27 @@
 #!/usr/bin/env python3
 """
-Tiktok Jetonlu Yayın Bulma - otomatik tarama botu
+Tiktok Jetonlu Yayın Bulma - otomatik keşif ve sandık tarama botu
 
-İzleme listesindeki TikTok hesaplarının canlı yayına girip girmediğini düzenli kontrol eder.
-Canlıysa yayına bağlanır, sandık (jeton kutusu) olaylarını dinler ve sandık açıldığında
-toplam jeton miktarı, sandık sayısı, bir sonraki sandığın açılma zamanı ve yayın linkiyle
-siteye bildirir. Yayın kapanınca siteden de kaldırır.
+Bot, VDS üzerinde 7/24 çalışmak için tasarlandı ve elle hesap girilmesini beklemez:
+
+1. Keşif: Bağlandığı her canlı yayında PK/battle eşleşmelerini, ortak yayın (co-host)
+   listelerini, saatlik sıralama listelerini ve banner'ları okur. Bu mesajlarda geçen
+   yayıncıları (çoğunun o an açık oda numarasıyla birlikte) keşif havuzuna ekler.
+   Böylece birkaç yayından başlayıp kartopu gibi yayılır.
+2. Doğrulama: Havuzdaki hesapların canlı olup olmadığını TikTok'un toplu oda kontrolüyle
+   (tek istekte 20 oda) doğrular.
+3. Yoklama: Canlı hesaplara sırayla kısa süre (varsayılan 2 dk) bağlanıp sandık olup
+   olmadığına bakar. Sandık görürse yayını "tutar", siteye ekler ve sandık bitene kadar
+   izler. Görmezse bağlantıyı kapatıp sıradakine geçer.
+4. Öğrenme: Sandık görülen hesaplar havuzda öne çıkar ve daha sık yoklanır.
+
+Havuz kesif.db (SQLite) dosyasında saklanır; bot yeniden başlasa da öğrendiklerini unutmaz.
 
 Kullanım:
     python tiktok_jeton_bot.py              botu başlatır
     python tiktok_jeton_bot.py --test       site bağlantısını ve API anahtarını dener
     python tiktok_jeton_bot.py --check KULLANICI   tek bir hesabın canlı olup olmadığını dener
+    python tiktok_jeton_bot.py --stats      keşif havuzunun özetini gösterir
 """
 
 from __future__ import annotations
@@ -19,23 +30,25 @@ import argparse
 import asyncio
 import json
 import logging
+import logging.handlers
 import os
 import random
 import signal
 import socket
+import sqlite3
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import httpx
 
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 BASE_DIR = Path(__file__).resolve().parent
 
 # ----------------------------------------------------------------------------
-# Görünüm
+# Görünüm ve kayıt
 # ----------------------------------------------------------------------------
 
 if os.name == "nt":
@@ -52,7 +65,7 @@ C = {
 }
 
 
-class Fmt(logging.Formatter):
+class ConsoleFmt(logging.Formatter):
     COLORS = {logging.WARNING: C["gold"], logging.ERROR: C["red"], logging.DEBUG: C["dim"]}
 
     def format(self, record: logging.LogRecord) -> str:
@@ -61,21 +74,48 @@ class Fmt(logging.Formatter):
         return f"{C['dim']}{t}{C['reset']} {color}{record.getMessage()}{C['reset']}"
 
 
+class FileFmt(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record.created))
+        msg = record.getMessage()
+        for code in C.values():
+            msg = msg.replace(code, "")
+        return f"{t} {record.levelname:<7} {msg}"
+
+
 log = logging.getLogger("tjbot")
 
 
-def setup_logging(verbose: bool) -> None:
+def setup_logging(verbose: bool, log_file: str = "") -> None:
+    log.handlers.clear()
     h = logging.StreamHandler(sys.stdout)
-    h.setFormatter(Fmt())
+    h.setFormatter(ConsoleFmt())
     log.addHandler(h)
+    if log_file:
+        path = Path(log_file)
+        if not path.is_absolute():
+            path = BASE_DIR / path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fh = logging.handlers.RotatingFileHandler(path, maxBytes=5_000_000, backupCount=5, encoding="utf-8")
+        fh.setFormatter(FileFmt())
+        log.addHandler(fh)
     log.setLevel(logging.DEBUG if verbose else logging.INFO)
-    # Kütüphanelerin gürültüsünü kıs
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("TikTokLive").setLevel(logging.CRITICAL)
 
 
 def coins_text(n: int) -> str:
     return f"{n:,}".replace(",", ".")
+
+
+def clean_username(u: Any) -> str:
+    u = str(u or "").strip()
+    if "tiktok.com/@" in u:
+        u = u.split("tiktok.com/@", 1)[1].split("/")[0].split("?")[0]
+    u = u.lstrip("@").lower()
+    if 2 <= len(u) <= 24 and all(ch.isalnum() or ch in "._" for ch in u):
+        return u
+    return ""
 
 
 # ----------------------------------------------------------------------------
@@ -87,28 +127,48 @@ def coins_text(n: int) -> str:
 class Config:
     site_url: str
     api_key: str
-    extra_usernames: list[str] = field(default_factory=list)
-    check_interval_sec: int = 120
-    max_connections: int = 25
+    # Keşif
+    discovery: bool = True
+    feed_discovery: bool = True
+    seed_usernames: List[str] = field(default_factory=list)
+    extra_usernames: List[str] = field(default_factory=list)  # eski sürümle uyum: tohum gibi davranır
+    # Bağlantılar
+    max_connections: int = 40
+    probe_seconds: int = 120
+    linger_minutes: int = 8
+    start_interval_sec: float = 2.0
+    # Yeniden yoklama aralıkları (dakika)
+    probe_cooldown_min: int = 25
+    hot_cooldown_min: int = 6
+    pinned_check_sec: int = 120
+    # Havuz
+    pool_max: int = 30000
+    data_file: str = "kesif.db"
+    # Site
     heartbeat_sec: int = 60
     keepalive_sec: int = 180
+    # Diğer
     sign_api_key: str = ""
     proxy: str = ""
+    log_file: str = "logs/bot.log"
 
     @classmethod
     def load(cls, path: Path) -> "Config":
         data: Dict[str, Any] = {}
         if path.exists():
             data = json.loads(path.read_text(encoding="utf-8"))
-        # Ortam değişkenleri dosyadaki değerleri ezer
         data["site_url"] = os.environ.get("TJ_SITE_URL", data.get("site_url", ""))
         data["api_key"] = os.environ.get("TJ_API_KEY", data.get("api_key", ""))
-        known = {f for f in cls.__dataclass_fields__}
+        # Eski ayar adı
+        if "check_interval_sec" in data and "pinned_check_sec" not in data:
+            data["pinned_check_sec"] = data["check_interval_sec"]
+        known = set(cls.__dataclass_fields__)
         cfg = cls(**{k: v for k, v in data.items() if k in known})
         cfg.site_url = cfg.site_url.rstrip("/")
-        cfg.extra_usernames = [clean_username(u) for u in cfg.extra_usernames if clean_username(u)]
-        cfg.check_interval_sec = max(30, int(cfg.check_interval_sec))
+        cfg.seed_usernames = [u for u in map(clean_username, cfg.seed_usernames + cfg.extra_usernames) if u]
         cfg.max_connections = max(1, int(cfg.max_connections))
+        cfg.probe_seconds = max(30, int(cfg.probe_seconds))
+        cfg.pinned_check_sec = max(30, int(cfg.pinned_check_sec))
         return cfg
 
     def validate(self) -> Optional[str]:
@@ -119,13 +179,6 @@ class Config:
         return None
 
 
-def clean_username(u: str) -> str:
-    u = (u or "").strip()
-    if "tiktok.com/@" in u:
-        u = u.split("tiktok.com/@", 1)[1].split("/")[0].split("?")[0]
-    return u.lstrip("@").lower()
-
-
 # ----------------------------------------------------------------------------
 # Site API
 # ----------------------------------------------------------------------------
@@ -133,13 +186,12 @@ def clean_username(u: str) -> str:
 
 class SiteAPI:
     def __init__(self, cfg: Config):
-        self.cfg = cfg
         self.http = httpx.AsyncClient(
             base_url=cfg.site_url,
             headers={"Authorization": f"Bearer {cfg.api_key}", "User-Agent": f"tiktok-jeton-bot/{VERSION}"},
             timeout=20,
         )
-        self._lock = asyncio.Lock()  # Site tarafında yazmalar sırayla gitsin
+        self._lock = asyncio.Lock()
 
     async def _post(self, path: str, body: dict, retries: int = 3) -> Optional[dict]:
         for attempt in range(retries):
@@ -151,7 +203,7 @@ class SiteAPI:
                     log.error(f"Site API anahtarını kabul etmedi: {data.get('error', '')}")
                     return None
                 if r.status_code >= 500 or r.status_code == 429:
-                    raise httpx.HTTPStatusError(data.get("error", str(r.status_code)), request=r.request, response=r)
+                    raise httpx.HTTPStatusError(str(data.get("error", r.status_code)), request=r.request, response=r)
                 if r.status_code >= 400:
                     log.warning(f"Site isteği reddetti ({path}): {data.get('error', r.status_code)}")
                     return None
@@ -178,7 +230,240 @@ class SiteAPI:
 
 
 # ----------------------------------------------------------------------------
-# Sandık takibi
+# Keşif havuzu (SQLite)
+# ----------------------------------------------------------------------------
+
+
+class Pool:
+    """Keşfedilen yayıncılar ve ne zaman yeniden bakılacakları."""
+
+    def __init__(self, path: Path):
+        self.db = sqlite3.connect(path)
+        self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS accounts (
+                username TEXT PRIMARY KEY,
+                room_id TEXT,
+                source TEXT,
+                added REAL,
+                last_live REAL DEFAULT 0,
+                last_probe REAL DEFAULT 0,
+                next_check REAL DEFAULT 0,
+                probes INTEGER DEFAULT 0,
+                misses INTEGER DEFAULT 0,
+                chest_hits INTEGER DEFAULT 0,
+                coins_total INTEGER DEFAULT 0,
+                last_chest REAL DEFAULT 0,
+                pinned INTEGER DEFAULT 0
+            )"""
+        )
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_next ON accounts(next_check)")
+        self.db.commit()
+
+    def add(self, username: str, room_id: Optional[int | str], source: str, live_now: bool, now: float) -> bool:
+        """Yeni hesap eklendiyse True döner."""
+        rid = str(room_id) if room_id else None
+        cur = self.db.execute("SELECT username, room_id, next_check FROM accounts WHERE username=?", (username,))
+        row = cur.fetchone()
+        if row is None:
+            self.db.execute(
+                "INSERT INTO accounts(username, room_id, source, added, last_live, next_check) VALUES(?,?,?,?,?,?)",
+                (username, rid, source, now, now if live_now else 0, now),
+            )
+            return True
+        if rid and rid != row["room_id"]:
+            # Yeni oda = yeni canlı yayın: hemen bakılabilir
+            self.db.execute(
+                "UPDATE accounts SET room_id=?, last_live=?, next_check=MIN(next_check, ?) WHERE username=?",
+                (rid, now, now, username),
+            )
+        elif live_now:
+            self.db.execute("UPDATE accounts SET last_live=? WHERE username=?", (now, username))
+        return False
+
+    def set_pinned(self, usernames: Set[str], now: float) -> None:
+        self.db.execute("UPDATE accounts SET pinned=0 WHERE pinned=1")
+        for u in usernames:
+            self.add(u, None, "liste", False, now)
+        if usernames:
+            self.db.executemany("UPDATE accounts SET pinned=1 WHERE username=?", [(u,) for u in usernames])
+        self.db.commit()
+
+    def candidates(self, now: float, exclude: Set[str], limit: int) -> List[sqlite3.Row]:
+        rows = self.db.execute(
+            """SELECT * FROM accounts WHERE next_check <= ?
+               ORDER BY pinned DESC,
+                        (chest_hits > 0) DESC,
+                        (room_id IS NOT NULL) DESC,
+                        last_chest DESC,
+                        last_live DESC
+               LIMIT ?""",
+            (now, limit + len(exclude)),
+        ).fetchall()
+        return [r for r in rows if r["username"] not in exclude][:limit]
+
+    def schedule(self, username: str, at: float) -> None:
+        self.db.execute("UPDATE accounts SET next_check=? WHERE username=?", (at, username))
+
+    def mark_offline(self, username: str, now: float, cfg: Config) -> None:
+        row = self.db.execute("SELECT pinned, chest_hits, last_live FROM accounts WHERE username=?", (username,)).fetchone()
+        if row is None:
+            return
+        if row["pinned"]:
+            wait = cfg.pinned_check_sec
+        elif row["chest_hits"] > 0:
+            wait = 15 * 60
+        elif now - (row["last_live"] or 0) > 3 * 86400:
+            wait = 6 * 3600
+        else:
+            wait = 60 * 60
+        self.db.execute(
+            "UPDATE accounts SET room_id=NULL, next_check=? WHERE username=?",
+            (now + wait * random.uniform(0.85, 1.15), username),
+        )
+
+    def mark_probe(self, username: str, now: float, chest: bool, coins: int, cfg: Config) -> None:
+        if chest:
+            self.db.execute(
+                """UPDATE accounts SET last_probe=?, last_live=?, probes=probes+1, misses=0,
+                   chest_hits=chest_hits+1, coins_total=coins_total+?, last_chest=?, next_check=?
+                   WHERE username=?""",
+                (now, now, coins, now, now + cfg.hot_cooldown_min * 60, username),
+            )
+            return
+        row = self.db.execute("SELECT misses, chest_hits, pinned FROM accounts WHERE username=?", (username,)).fetchone()
+        misses = (row["misses"] if row else 0) + 1
+        if row and row["pinned"]:
+            wait = cfg.pinned_check_sec
+        elif row and row["chest_hits"] > 0:
+            wait = cfg.hot_cooldown_min * 60 * min(1 + misses * 0.5, 4)
+        else:
+            wait = cfg.probe_cooldown_min * 60 * min(1 + misses * 0.5, 6)
+        self.db.execute(
+            "UPDATE accounts SET last_probe=?, last_live=?, probes=probes+1, misses=?, next_check=? WHERE username=?",
+            (now, now, misses, now + wait * random.uniform(0.85, 1.15), username),
+        )
+
+    def stats(self, now: float) -> dict:
+        q = lambda sql, *a: self.db.execute(sql, a).fetchone()[0]  # noqa: E731
+        return {
+            "pool": q("SELECT COUNT(*) FROM accounts"),
+            "withChests": q("SELECT COUNT(*) FROM accounts WHERE chest_hits > 0"),
+            "discoveredToday": q("SELECT COUNT(*) FROM accounts WHERE added > ?", now - 86400),
+            "liveRecently": q("SELECT COUNT(*) FROM accounts WHERE last_live > ?", now - 1800),
+        }
+
+    def top(self, limit: int = 15) -> List[sqlite3.Row]:
+        return self.db.execute(
+            "SELECT * FROM accounts WHERE chest_hits > 0 ORDER BY chest_hits DESC, coins_total DESC LIMIT ?", (limit,)
+        ).fetchall()
+
+    def prune(self, max_rows: int, now: float) -> int:
+        n = self.db.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
+        if n <= max_rows:
+            return 0
+        extra = n - max_rows
+        cur = self.db.execute(
+            """DELETE FROM accounts WHERE username IN (
+                 SELECT username FROM accounts WHERE pinned=0 AND chest_hits=0
+                 ORDER BY last_live ASC, added ASC LIMIT ?)""",
+            (extra,),
+        )
+        return cur.rowcount
+
+    def commit(self) -> None:
+        self.db.commit()
+
+
+# ----------------------------------------------------------------------------
+# Mesajlardan yayıncı çıkarma
+# ----------------------------------------------------------------------------
+
+DISCOVERY_EVENTS = {
+    "LinkMicBattleEvent": "pk",
+    "LinkMicArmiesEvent": "pk",
+    "LinkMicMethodEvent": "ortak yayın",
+    "LinkEvent": "ortak yayın",
+    "LinkLayerEvent": "ortak yayın",
+    "RankUpdateEvent": "sıralama",
+    "HourlyRankRewardEvent": "sıralama",
+    "InRoomBannerEvent": "banner",
+}
+
+_SCALARS = (str, int, float, bool, bytes)
+
+
+def extract_anchors(obj: Any, depth: int = 0, out: Optional[Dict[str, Optional[int]]] = None) -> Dict[str, Optional[int]]:
+    """Bir protobuf mesajının içindeki tüm kullanıcıları (kullanıcı adı -> açık oda no) toplar."""
+    if out is None:
+        out = {}
+    if depth > 8 or obj is None or isinstance(obj, _SCALARS):
+        return out
+    if isinstance(obj, (list, tuple)):
+        for x in obj:
+            extract_anchors(x, depth + 1, out)
+        return out
+    if isinstance(obj, dict):
+        for x in obj.values():
+            extract_anchors(x, depth + 1, out)
+        return out
+    fields = getattr(obj, "__dataclass_fields__", None)
+    if not fields:
+        return out
+    display_id = getattr(obj, "display_id", None)
+    if isinstance(display_id, str) and display_id:
+        u = clean_username(display_id)
+        if u:
+            room = None
+            direct = getattr(obj, "room_id", None)  # PK katılımcı bilgisinde oda no doğrudan gelir
+            if isinstance(direct, int) and direct > 0:
+                room = direct
+            own = getattr(obj, "own_room", None) if room is None else None
+            if own is not None:
+                ids = [int(x) for x in (getattr(own, "room_ids", None) or []) if x] or [
+                    int(x) for x in (getattr(own, "room_ids_str", None) or []) if str(x).isdigit()
+                ]
+                room = ids[0] if ids else None
+            if room or u not in out:
+                out[u] = room
+    for name in fields:
+        v = getattr(obj, name, None)
+        if v is None or isinstance(v, _SCALARS):
+            continue
+        extract_anchors(v, depth + 1, out)
+    return out
+
+
+def extract_from_json(obj: Any, out: Optional[Dict[str, Optional[int]]] = None, depth: int = 0) -> Dict[str, Optional[int]]:
+    """TikTok'un JSON yanıtlarından (oda listeleri) yayıncı ve oda numarası toplar."""
+    if out is None:
+        out = {}
+    if depth > 10:
+        return out
+    if isinstance(obj, list):
+        for x in obj:
+            extract_from_json(x, out, depth + 1)
+    elif isinstance(obj, dict):
+        owner = obj.get("owner")
+        room_id = obj.get("id_str") or obj.get("room_id_str") or obj.get("id")
+        if isinstance(owner, dict) and owner.get("display_id"):
+            u = clean_username(owner["display_id"])
+            if u and str(room_id or "").isdigit():
+                out[u] = int(room_id)
+        if obj.get("display_id") and isinstance(obj.get("own_room"), dict):
+            u = clean_username(obj["display_id"])
+            ids = obj["own_room"].get("room_ids_str") or obj["own_room"].get("room_ids") or []
+            if u and ids and str(ids[0]).isdigit():
+                out[u] = int(ids[0])
+        for v in obj.values():
+            if isinstance(v, (dict, list)):
+                extract_from_json(v, out, depth + 1)
+    return out
+
+
+# ----------------------------------------------------------------------------
+# Sandık durumu
 # ----------------------------------------------------------------------------
 
 
@@ -187,51 +472,49 @@ class Chest:
     id: str
     coins: int
     people: int
-    unpack_at: int  # unix saniye
+    unpack_at: int
     sender: str
 
 
 @dataclass
 class StreamState:
-    """Bir yayıncının anlık sandık durumu. TikTok bağlantısından bağımsız test edilebilir."""
-
     username: str
     chests: Dict[str, Chest] = field(default_factory=dict)
+    seen: Set[str] = field(default_factory=set)
     viewers: Optional[int] = None
     title: str = ""
     reported: bool = False
     last_report_key: Optional[tuple] = None
     last_report_at: float = 0.0
+    last_chest_at: float = 0.0
+    coins_seen: int = 0
 
-    def add_chest(self, chest: Chest) -> bool:
-        new = chest.id not in self.chests
-        self.chests[chest.id] = chest
+    def add_chest(self, c: Chest, now: float) -> bool:
+        new = c.id not in self.seen
+        self.chests[c.id] = c
+        self.seen.add(c.id)
+        self.last_chest_at = now
+        if new:
+            self.coins_seen += c.coins
         return new
 
-    def remove_chest(self, chest_id: str) -> None:
-        self.chests.pop(chest_id, None)
+    def remove_chest(self, cid: str) -> None:
+        self.chests.pop(cid, None)
 
-    def prune(self, now: float, grace: int = 45) -> int:
-        """Açılma zamanı üzerinden belli süre geçmiş sandıkları düşür."""
-        gone = [cid for cid, c in self.chests.items() if c.unpack_at and c.unpack_at + grace < now]
-        for cid in gone:
+    def prune(self, now: float, grace: int = 45) -> None:
+        for cid in [cid for cid, c in self.chests.items() if c.unpack_at and c.unpack_at + grace < now]:
             del self.chests[cid]
-        return len(gone)
 
     def payload(self, now: float) -> dict:
         active = list(self.chests.values())
         coins = sum(c.coins for c in active)
         upcoming = [c.unpack_at for c in active if c.unpack_at and c.unpack_at > now]
-        next_at = min(upcoming) if upcoming else None
-        if active:
-            title = f"{len(active)} sandık, toplam {coins_text(coins)} jeton"
-        else:
-            title = self.title[:120] if self.title else ""
+        title = f"{len(active)} sandık, toplam {coins_text(coins)} jeton" if active else self.title[:120]
         return {
             "username": self.username,
             "coins": coins,
             "chests": len(active),
-            "nextChestAt": next_at,
+            "nextChestAt": min(upcoming) if upcoming else None,
             "viewers": self.viewers,
             "title": title,
             "url": f"https://www.tiktok.com/@{self.username}/live",
@@ -239,94 +522,99 @@ class StreamState:
 
 
 # ----------------------------------------------------------------------------
-# Yayıncı izleyicisi
+# Tek bir yayına bağlantı
 # ----------------------------------------------------------------------------
 
 
-class Watcher:
-    def __init__(self, username: str, bot: "Bot"):
-        self.username = username
+class Session:
+    """Bir canlı yayına açık bağlantı. mode: 'probe' (yoklama), 'hold' (sandıklı, tutuluyor), 'pinned' (listede)."""
+
+    def __init__(self, bot: "Bot", username: str, room_id: Optional[int], mode: str):
         self.bot = bot
+        self.username = username
+        self.room_id = room_id
+        self.mode = mode
         self.state = StreamState(username)
-        self.client = None
+        self.client: Any = None
         self.task: Optional[asyncio.Task] = None
-        self.live = False
+        self.opened_at = time.time()
         self.connected = False
-        self.next_check = time.time() + random.uniform(0, 15)
-        self.fail_count = 0
+        self.closing = False
+        self.live_ended = False
         self._report_soon: Optional[asyncio.Task] = None
+        self._discovery_at: Dict[str, float] = {}
 
-    # -- TikTok bağlantısı --
-
-    async def connect(self) -> None:
+    async def open(self) -> None:
         from TikTokLive import TikTokLiveClient
-        from TikTokLive.events import (
-            ConnectEvent,
-            DisconnectEvent,
-            EnvelopeEvent,
-            LiveEndEvent,
-            RoomUserSeqEvent,
-        )
+        from TikTokLive import events as ev
 
         client = TikTokLiveClient(unique_id=f"@{self.username}", **self.bot.client_kwargs())
         self.client = client
 
-        @client.on(ConnectEvent)
-        async def _on_connect(_: ConnectEvent) -> None:
+        async def on_connect(_: Any) -> None:
             self.connected = True
-            log.info(f"{C['cyan']}@{self.username}{C['reset']} yayınına bağlanıldı, sandıklar dinleniyor")
+            if self.mode != "probe":
+                log.info(f"{C['cyan']}@{self.username}{C['reset']} yayınına bağlanıldı")
 
-        @client.on(EnvelopeEvent)
-        async def _on_envelope(event: EnvelopeEvent) -> None:
+        async def on_envelope(event: Any) -> None:
             self.handle_envelope(event)
 
-        @client.on(RoomUserSeqEvent)
-        async def _on_viewers(event: RoomUserSeqEvent) -> None:
+        async def on_viewers(event: Any) -> None:
             try:
                 self.state.viewers = int(event.total)
             except Exception:
                 pass
 
-        @client.on(LiveEndEvent)
-        async def _on_end(_: LiveEndEvent) -> None:
-            log.info(f"@{self.username} yayını bitirdi")
-            await self.finish()
+        async def on_end(_: Any) -> None:
+            self.live_ended = True
+            await self.bot.close_session(self, "yayın bitti")
 
-        @client.on(DisconnectEvent)
-        async def _on_disconnect(_: DisconnectEvent) -> None:
-            if self.connected:
-                log.debug(f"@{self.username} bağlantısı kapandı")
+        async def on_disconnect(_: Any) -> None:
             self.connected = False
 
-        self.task = await client.start(fetch_room_info=True)
-        try:
-            info = client.room_info or {}
-            self.state.title = str(info.get("title") or "")
-        except Exception:
-            pass
-        self.live = True
-        self.task.add_done_callback(lambda _t: asyncio.ensure_future(self._on_task_done()))
+        client.add_listener(ev.ConnectEvent, on_connect)
+        client.add_listener(ev.EnvelopeEvent, on_envelope)
+        client.add_listener(ev.RoomUserSeqEvent, on_viewers)
+        client.add_listener(ev.LiveEndEvent, on_end)
+        client.add_listener(ev.DisconnectEvent, on_disconnect)
 
-    async def _on_task_done(self) -> None:
-        was = self.live
-        self.connected = False
-        self.client = None
-        self.task = None
-        if was:
-            # Bağlantı koptu: yayın hâlâ açık olabilir, kısa süre sonra tekrar kontrol et
-            self.next_check = time.time() + 20
-            self.live = False
+        if self.bot.cfg.discovery:
+            for name, source in DISCOVERY_EVENTS.items():
+                cls = getattr(ev, name, None)
+                if cls is not None:
+                    client.add_listener(cls, self._discovery_handler(name, source))
+
+        self.task = await client.start(room_id=self.room_id or None, fetch_room_info=False)
+        self.opened_at = time.time()
+        self.task.add_done_callback(lambda _t: asyncio.ensure_future(self.bot.close_session(self, "bağlantı kapandı")))
+
+    def _discovery_handler(self, name: str, source: str):
+        async def handler(event: Any) -> None:
+            now = time.time()
+            # Aynı türden mesajı en fazla 10 sn'de bir işle
+            if now - self._discovery_at.get(name, 0) < 10:
+                return
+            self._discovery_at[name] = now
+            try:
+                found = extract_anchors(event)
+            except Exception as e:  # Beklenmedik mesaj yapısı keşfi durdurmasın
+                log.debug(f"Keşif mesajı okunamadı ({name}): {e}")
+                return
+            found.pop(self.username, None)
+            if found:
+                self.bot.discovered(found, source, via=self.username)
+
+        return handler
 
     def handle_envelope(self, event: Any) -> None:
         info = getattr(event, "envelope_info", None)
         if info is None:
             return
+        now = time.time()
         cid = str(getattr(info, "envelope_id", "") or f"{info.unpack_at}-{info.diamond_count}")
         display = getattr(event, "display", None)
-        hidden = getattr(display, "name", str(display)) == "HIDE"
-        if hidden:
+        if getattr(display, "name", str(display)) == "HIDE":
             self.state.remove_chest(cid)
-            log.debug(f"@{self.username} sandığı kapandı ({cid})")
         else:
             chest = Chest(
                 id=cid,
@@ -335,16 +623,17 @@ class Watcher:
                 unpack_at=int(info.unpack_at or 0),
                 sender=str(info.send_user_name or ""),
             )
-            if self.state.add_chest(chest):
-                wait = max(0, chest.unpack_at - int(time.time()))
+            if self.state.add_chest(chest, now):
+                wait = max(0, chest.unpack_at - int(now))
                 log.info(
                     f"{C['gold']}Sandık{C['reset']} @{self.username}: {C['gold']}{coins_text(chest.coins)} jeton{C['reset']}, "
                     f"{chest.people} kişi, {wait // 60} dk {wait % 60} sn sonra açılıyor"
                 )
+                if self.mode == "probe":
+                    self.mode = "hold"
         self.schedule_report()
 
     def schedule_report(self, delay: float = 2.0) -> None:
-        """Art arda gelen olayları tek bir bildirime topla."""
         if self._report_soon and not self._report_soon.done():
             return
 
@@ -362,90 +651,37 @@ class Watcher:
         if not force and key == self.state.last_report_key:
             return
         if not self.state.reported and p["chests"] == 0:
-            return  # Sandık görmeden siteye yayın ekleme
+            return
         r = await self.bot.api.report(p)
         if not r:
             return
         self.state.last_report_key = key
         self.state.last_report_at = now
-        result = r.get("result")
-        if result == "created":
+        if r.get("result") == "created":
             self.state.reported = True
+            self.bot.counters["added"] += 1
             msg = "onaya gönderildi" if r.get("pending") else "siteye eklendi"
             log.info(f"{C['green']}@{self.username} {msg}{C['reset']} ({coins_text(p['coins'])} jeton, {p['chests']} sandık)")
-        elif result == "updated":
+        elif r.get("result") == "updated":
             self.state.reported = True
-            log.debug(f"@{self.username} sitede güncellendi")
-        elif result == "skipped":
+        elif r.get("result") == "skipped":
             log.info(f"@{self.username} eklenmedi: {r.get('reason', '')}")
 
-    async def keepalive(self) -> None:
-        """Sandık varken sitedeki yayını canlı tut."""
-        if not self.state.reported:
-            return
-        now = time.time()
+    async def tick(self, now: float) -> Optional[str]:
+        """Periyodik kontrol. Kapatılması gerekiyorsa sebebini döner."""
         self.state.prune(now)
-        if self.state.chests and now - self.state.last_report_at > self.bot.cfg.keepalive_sec:
-            await self.report(force=True)
-        elif self.state.last_report_key and self.state.last_report_key[1] != len(self.state.chests):
-            await self.report()
-
-    async def finish(self) -> None:
-        """Yayın bitti: bağlantıyı kapat, siteden kaldır."""
         if self.state.reported:
-            await self.bot.api.end(self.username)
-            log.info(f"@{self.username} siteden kaldırıldı")
-        self.state = StreamState(self.username)
-        self.live = False
-        self.connected = False
-        client, self.client = self.client, None
-        if client:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
-        self.next_check = time.time() + self.bot.cfg.check_interval_sec
+            if self.state.chests and now - self.state.last_report_at > self.bot.cfg.keepalive_sec:
+                await self.report(force=True)
+            elif self.state.last_report_key and self.state.last_report_key[1] != len(self.state.chests):
+                await self.report()
+        if self.mode == "probe" and now - self.opened_at > self.bot.cfg.probe_seconds:
+            return "sandık yok"
+        if self.mode == "hold" and not self.state.chests and now - self.state.last_chest_at > self.bot.cfg.linger_minutes * 60:
+            return "sandık kalmadı"
+        return None
 
-    async def check(self) -> None:
-        """Canlı mı diye bak, canlıysa bağlan."""
-        from TikTokLive.client.errors import UserNotFoundError, UserOfflineError
-
-        try:
-            live = await self.bot.is_live(self.username)
-        except UserNotFoundError:
-            log.warning(f"@{self.username} bulunamadı, 30 dk sonra tekrar denenecek")
-            self.next_check = time.time() + 1800
-            return
-        except Exception as e:
-            self.fail_count += 1
-            backoff = min(1800, self.bot.cfg.check_interval_sec * (2 ** min(self.fail_count, 4)))
-            log.debug(f"@{self.username} kontrol edilemedi: {type(e).__name__}: {e}")
-            self.next_check = time.time() + backoff
-            return
-
-        self.fail_count = 0
-        if not live:
-            if self.state.reported:
-                await self.finish()
-            self.next_check = time.time() + self.bot.cfg.check_interval_sec * random.uniform(0.85, 1.15)
-            return
-
-        if self.bot.connected_count() >= self.bot.cfg.max_connections:
-            log.debug(f"@{self.username} canlı ama bağlantı sınırı dolu")
-            self.next_check = time.time() + 60
-            return
-
-        log.info(f"{C['pink']}@{self.username} canlı{C['reset']}, bağlanılıyor")
-        try:
-            await self.connect()
-        except UserOfflineError:
-            self.next_check = time.time() + self.bot.cfg.check_interval_sec
-        except Exception as e:
-            log.warning(f"@{self.username} yayınına bağlanılamadı: {type(e).__name__}: {e}")
-            self.client = None
-            self.next_check = time.time() + max(120, self.bot.cfg.check_interval_sec)
-
-    async def stop(self) -> None:
+    async def disconnect(self) -> None:
         client, self.client = self.client, None
         if client:
             try:
@@ -458,99 +694,296 @@ class Watcher:
 # Ana bot
 # ----------------------------------------------------------------------------
 
+FEED_URL = "https://webcast.tiktok.com/webcast/feed/"
+
 
 class Bot:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.api = SiteAPI(cfg)
-        self.watchers: Dict[str, Watcher] = {}
-        self.site_watchlist: list[str] = []
+        self.pool = Pool(BASE_DIR / cfg.data_file if not Path(cfg.data_file).is_absolute() else Path(cfg.data_file))
+        self.sessions: Dict[str, Session] = {}
+        self.starting: Set[str] = set()
         self.stopping = asyncio.Event()
-        self._checker = None
-        self._check_sem = asyncio.Semaphore(3)  # Aynı anda en fazla 3 canlı kontrolü
+        self._web_client: Any = None
+        self._web_lock = asyncio.Semaphore(2)
+        self.pinned: Set[str] = set()
+        self.seeds: Set[str] = set(cfg.seed_usernames)
+        self.counters = {"probed": 0, "added": 0, "discovered": 0, "checks": 0, "check_errors": 0}
+        self.feed_disabled_until = 0.0
+        self.feed_fails = 0
+        self.tiktok_backoff_until = 0.0
         if cfg.sign_api_key:
             os.environ["SIGN_API_KEY"] = cfg.sign_api_key
 
+    # -- TikTok yardımcıları --
+
     def client_kwargs(self) -> dict:
-        if not self.cfg.proxy:
-            return {}
-        return {"web_proxy": httpx.Proxy(self.cfg.proxy)}
+        return {"web_proxy": httpx.Proxy(self.cfg.proxy)} if self.cfg.proxy else {}
 
-    async def is_live(self, username: str) -> bool:
-        from TikTokLive import TikTokLiveClient
+    def web(self) -> Any:
+        if self._web_client is None:
+            from TikTokLive import TikTokLiveClient
 
-        async with self._check_sem:
-            if self._checker is None:
-                self._checker = TikTokLiveClient(unique_id="tiktok", **self.client_kwargs())
-            result = await self._checker.web.fetch_is_live(unique_id=username)
-            await asyncio.sleep(random.uniform(0.8, 2.0))  # TikTok'u yormamak için
-            return bool(result)
+            self._web_client = TikTokLiveClient(unique_id="tiktok", **self.client_kwargs())
+        return self._web_client.web
 
-    def connected_count(self) -> int:
-        return sum(1 for w in self.watchers.values() if w.client is not None)
+    async def rooms_alive(self, room_ids: List[int]) -> List[bool]:
+        async with self._web_lock:
+            res = await self.web().fetch_is_live.fetch_is_live_room_ids(*room_ids)
+            await asyncio.sleep(random.uniform(0.5, 1.2))
+            return [bool(x) for x in res]
 
-    def status(self) -> dict:
-        return {
-            "watching": len(self.watchers),
-            "live": sum(1 for w in self.watchers.values() if w.live),
-            "connected": sum(1 for w in self.watchers.values() if w.connected),
-        }
+    async def user_live(self, username: str) -> Tuple[bool, Optional[int]]:
+        """Kullanıcı adından canlılık ve oda numarası."""
+        from TikTokLive.client.web.routes.fetch_room_id_api import FetchRoomIdAPIRoute
 
-    def sync_watchers(self) -> None:
-        wanted = set(self.site_watchlist) | set(self.cfg.extra_usernames)
-        for u in wanted - set(self.watchers):
-            self.watchers[u] = Watcher(u, self)
-            log.debug(f"@{u} izleme listesine eklendi")
-        for u in set(self.watchers) - wanted:
-            w = self.watchers.pop(u)
-            asyncio.ensure_future(w.finish())
-            log.info(f"@{u} izleme listesinden çıkarıldı")
+        async with self._web_lock:
+            data = await FetchRoomIdAPIRoute.fetch_user_room_data(web=self.web(), unique_id=username)
+            await asyncio.sleep(random.uniform(0.8, 2.0))
+        d = data.get("data") or {}
+        room = str((d.get("user") or {}).get("roomId") or "")
+        status = (d.get("liveRoom") or {}).get("status")
+        # TikTokLive kütüphanesiyle aynı kural: 4 = yayın kapalı
+        live = status is not None and status != 4 and room.isdigit() and room != "0"
+        return live, int(room) if live else None
+
+    # -- Keşif --
+
+    def discovered(self, found: Dict[str, Optional[int]], source: str, via: str = "") -> None:
+        now = time.time()
+        new = 0
+        for u, room in found.items():
+            if self.pool.add(u, room, source, live_now=room is not None, now=now):
+                new += 1
+        if new:
+            self.counters["discovered"] += new
+            log.debug(f"{new} yeni yayıncı keşfedildi ({source}{', @' + via if via else ''})")
+
+    async def feed_discovery(self) -> None:
+        """Deneysel: TikTok'un canlı akışından tohum yayıncı çekmeyi dener."""
+        if not self.cfg.feed_discovery or time.time() < self.feed_disabled_until:
+            return
+        try:
+            async with self._web_lock:
+                r = await self.web().get(
+                    url=FEED_URL,
+                    extra_params={"channel_id": "86", "content_type": "0", "req_from": "feed_loadmore", "max_time": "0"},
+                    sign_url=True,
+                )
+            found = extract_from_json(r.json())
+            if not found:
+                raise ValueError("akışta yayın yok")
+            self.feed_fails = 0
+            self.discovered(found, "akış")
+            log.debug(f"Canlı akıştan {len(found)} yayın okundu")
+        except Exception as e:
+            self.feed_fails += 1
+            log.debug(f"Canlı akış okunamadı: {type(e).__name__}: {e}")
+            if self.feed_fails >= 3:
+                self.feed_disabled_until = time.time() + 6 * 3600
+                self.feed_fails = 0
+                log.info("Canlı akıştan keşif şu an çalışmıyor; 6 saat sonra tekrar denenecek. Keşif yayın içi verilerle sürüyor.")
+
+    # -- Oturumlar --
+
+    async def start_session(self, username: str, room_id: Optional[int]) -> None:
+        mode = "pinned" if username in self.pinned else "probe"
+        s = Session(self, username, room_id, mode)
+        self.starting.add(username)
+        try:
+            await s.open()
+            self.sessions[username] = s
+            self.counters["probed"] += 1
+            log.debug(f"@{username} yoklanıyor ({len(self.sessions)}/{self.cfg.max_connections})")
+        except Exception as e:
+            from TikTokLive.client.errors import UserOfflineError
+
+            await s.disconnect()
+            now = time.time()
+            if isinstance(e, UserOfflineError):
+                self.pool.mark_offline(username, now, self.cfg)
+            else:
+                name = type(e).__name__
+                log.debug(f"@{username} yayınına bağlanılamadı: {name}: {e}")
+                self.pool.schedule(username, now + 600)
+                self._note_tiktok_error(name, str(e))
+        finally:
+            self.starting.discard(username)
+
+    def _note_tiktok_error(self, name: str, msg: str) -> None:
+        text = f"{name} {msg}".lower()
+        if any(k in text for k in ("rate", "429", "limit", "captcha", "sign")):
+            self.tiktok_backoff_until = time.time() + 120
+            log.warning(f"TikTok/imza servisi istekleri sınırlıyor ({name}). 2 dk yavaşlanıyor.")
+
+    async def close_session(self, s: Session, reason: str) -> None:
+        if s.closing:
+            return
+        s.closing = True
+        self.sessions.pop(s.username, None)
+        now = time.time()
+        saw = bool(s.state.seen)
+        if s.live_ended:
+            self.pool.mark_offline(s.username, now, self.cfg)
+        else:
+            self.pool.mark_probe(s.username, now, saw, s.state.coins_seen, self.cfg)
+            if reason == "bağlantı kapandı" and (s.state.chests or s.mode == "pinned"):
+                self.pool.schedule(s.username, now + 15)  # Sandık varken koptu: hemen tekrar bağlan
+        self.pool.commit()
+        if s.state.reported and (s.live_ended or reason == "kapanış"):
+            await self.api.end(s.username)
+            log.info(f"@{s.username} siteden kaldırıldı ({reason})")
+        elif saw and reason != "bağlantı kapandı":
+            log.info(f"@{s.username} bırakıldı ({reason})")
+        await s.disconnect()
+
+    # -- Döngüler --
+
+    async def scheduler_loop(self) -> None:
+        while not self.stopping.is_set():
+            try:
+                await self._schedule_once()
+            except Exception as e:
+                log.warning(f"Zamanlayıcı hatası: {type(e).__name__}: {e}")
+            await self._sleep(3)
+
+    async def _schedule_once(self) -> None:
+        now = time.time()
+        for s in list(self.sessions.values()):
+            reason = await s.tick(now)
+            if reason:
+                await self.close_session(s, reason)
+
+        if now < self.tiktok_backoff_until:
+            return
+        free = self.cfg.max_connections - len(self.sessions) - len(self.starting)
+        if free <= 0:
+            return
+
+        busy = set(self.sessions) | self.starting
+        cands = self.pool.candidates(now, busy, limit=min(60, free * 3))
+        if not cands:
+            return
+
+        with_room = [r for r in cands if r["room_id"]]
+        without = [r for r in cands if not r["room_id"]]
+        live: List[Tuple[str, Optional[int]]] = []
+
+        # Oda numarası bilinenleri toplu doğrula
+        for i in range(0, len(with_room), 20):
+            chunk = with_room[i : i + 20]
+            try:
+                alive = await self.rooms_alive([int(r["room_id"]) for r in chunk])
+                self.counters["checks"] += 1
+            except Exception as e:
+                self.counters["check_errors"] += 1
+                log.debug(f"Toplu canlı kontrolü başarısız: {type(e).__name__}: {e}")
+                self._note_tiktok_error(type(e).__name__, str(e))
+                for r in chunk:
+                    self.pool.schedule(r["username"], now + 300)
+                break
+            for r, ok in zip(chunk, alive):
+                if ok:
+                    live.append((r["username"], int(r["room_id"])))
+                else:
+                    self.pool.mark_offline(r["username"], now, self.cfg)
+
+        # Oda numarası bilinmeyenleri tek tek (yavaş) kontrol et
+        for r in without[:3]:
+            try:
+                ok, room = await self.user_live(r["username"])
+                self.counters["checks"] += 1
+            except Exception as e:
+                self.counters["check_errors"] += 1
+                msg = str(e).lower()
+                if "not_found" in msg or "notfound" in type(e).__name__.lower():
+                    self.pool.schedule(r["username"], now + 7 * 86400)
+                else:
+                    self.pool.schedule(r["username"], now + 900)
+                    self._note_tiktok_error(type(e).__name__, str(e))
+                continue
+            if ok:
+                self.pool.add(r["username"], room, r["source"] or "liste", True, now)
+                live.append((r["username"], room))
+            else:
+                self.pool.mark_offline(r["username"], now, self.cfg)
+        for r in without[3:]:
+            self.pool.schedule(r["username"], now + random.uniform(30, 120))
+        self.pool.commit()
+
+        for username, room in live[:free]:
+            if self.stopping.is_set():
+                break
+            self.pool.schedule(username, now + 3600)  # Bağlıyken tekrar seçilmesin
+            await self.start_session(username, room)
+            await asyncio.sleep(self.cfg.start_interval_sec)
+        for username, _ in live[free:]:
+            self.pool.schedule(username, now + 20)  # Yer açılınca öncelikli
+        self.pool.commit()
 
     async def heartbeat_loop(self) -> None:
         first = True
         while not self.stopping.is_set():
             cfg = await self.api.heartbeat(self.status())
             if cfg is not None:
-                self.site_watchlist = [clean_username(u) for u in cfg.get("watchlist", []) if clean_username(u)]
-                before = len(self.watchers)
-                self.sync_watchers()
-                if first or len(self.watchers) != before:
-                    log.info(f"İzleme listesi: {len(self.watchers)} hesap")
+                self.pinned = {u for u in map(clean_username, cfg.get("watchlist", [])) if u}
+                self.pool.set_pinned(self.pinned, time.time())
+                known = {u for u in map(clean_username, cfg.get("knownUsernames", [])) if u}
+                seeds = (known | self.seeds) - self.pinned
+                if seeds:
+                    self.discovered({u: None for u in seeds}, "tohum")
+                    self.pool.commit()
+                if first:
+                    log.info(
+                        f"Siteye bağlanıldı. İzleme listesi: {len(self.pinned)} hesap, tohum: {len(seeds)} hesap, "
+                        f"keşif havuzu: {self.pool.stats(time.time())['pool']} hesap"
+                    )
                 first = False
             elif first:
                 log.error("Siteden ayarlar alınamadı. site_url ve api_key değerlerini kontrol et.")
             await self._sleep(self.cfg.heartbeat_sec)
 
-    async def check_loop(self) -> None:
+    async def discovery_loop(self) -> None:
         while not self.stopping.is_set():
-            now = time.time()
-            due = [w for w in self.watchers.values() if w.client is None and w.next_check <= now]
-            due.sort(key=lambda w: w.next_check)
-            for w in due[:10]:
-                if self.stopping.is_set():
-                    break
-                w.next_check = now + 3600  # Kontrol sürerken tekrar sıraya girmesin
-                await w.check()
-            await self._sleep(2)
-
-    async def keepalive_loop(self) -> None:
-        while not self.stopping.is_set():
-            for w in list(self.watchers.values()):
-                try:
-                    await w.keepalive()
-                except Exception as e:
-                    log.debug(f"@{w.username} güncellenemedi: {e}")
-            await self._sleep(15)
+            if self.cfg.discovery:
+                await self.feed_discovery()
+                removed = self.pool.prune(self.cfg.pool_max, time.time())
+                if removed:
+                    log.debug(f"Havuzdan {removed} eski hesap silindi")
+                self.pool.commit()
+                # Havuz boşsa ve hiç bağlantı yoksa kullanıcıyı uyar
+                if not self.sessions and self.pool.stats(time.time())["pool"] == 0:
+                    log.warning(
+                        "Keşif havuzu boş. Bot ilk yayını bulamadı: sitede bir yayın ekle ya da Otomasyon > İzleme listesine "
+                        "1-2 canlı yayıncı yaz; bot oradan kendisi yayılır."
+                    )
+            await self._sleep(600)
 
     async def status_loop(self) -> None:
         while not self.stopping.is_set():
             await self._sleep(300)
-            s = self.status()
-            chests = sum(len(w.state.chests) for w in self.watchers.values())
+            st = self.status()
             log.info(
-                f"{C['dim']}Durum: {s['watching']} hesap izleniyor, {s['live']} canlı, "
-                f"{s['connected']} yayına bağlı, {chests} açılmamış sandık{C['reset']}"
+                f"{C['dim']}Durum: havuz {st['pool']} hesap ({st['discoveredToday']} bugün), "
+                f"{st['connected']} yayına bağlı ({st['holding']} sandıklı), "
+                f"bu oturumda {self.counters['probed']} yayın yoklandı, {self.counters['added']} siteye eklendi{C['reset']}"
             )
+
+    def status(self) -> dict:
+        st = self.pool.stats(time.time())
+        holding = sum(1 for s in self.sessions.values() if s.state.chests)
+        return {
+            "watching": st["pool"],
+            "live": len(self.sessions),
+            "connected": sum(1 for s in self.sessions.values() if s.connected),
+            "pool": st["pool"],
+            "probing": sum(1 for s in self.sessions.values() if s.mode == "probe"),
+            "holding": holding,
+            "chestAccounts": st["withChests"],
+            "discoveredToday": st["discoveredToday"],
+            "discovery": self.cfg.discovery,
+        }
 
     async def _sleep(self, sec: float) -> None:
         try:
@@ -560,20 +993,23 @@ class Bot:
 
     async def run(self) -> None:
         log.info(f"{C['gold']}Tiktok Jetonlu Yayın Bulma botu {VERSION}{C['reset']} başlıyor, site: {self.cfg.site_url}")
+        log.info(
+            f"Keşif {'açık' if self.cfg.discovery else 'kapalı'}, en fazla {self.cfg.max_connections} eş zamanlı bağlantı, "
+            f"yoklama süresi {self.cfg.probe_seconds} sn"
+        )
         loops = [
             asyncio.ensure_future(self.heartbeat_loop()),
-            asyncio.ensure_future(self.check_loop()),
-            asyncio.ensure_future(self.keepalive_loop()),
+            asyncio.ensure_future(self.scheduler_loop()),
+            asyncio.ensure_future(self.discovery_loop()),
             asyncio.ensure_future(self.status_loop()),
         ]
         await self.stopping.wait()
         log.info("Kapatılıyor, açık yayınlar siteden kaldırılıyor...")
-        for w in list(self.watchers.values()):
-            if w.state.reported:
-                await self.api.end(w.username)
-            await w.stop()
+        for s in list(self.sessions.values()):
+            await self.close_session(s, "kapanış")
         for t in loops:
             t.cancel()
+        self.pool.commit()
         await self.api.close()
         log.info("Bot kapandı.")
 
@@ -592,7 +1028,10 @@ async def cmd_test(cfg: Config) -> int:
         log.error("Bağlantı başarısız. site_url ve api_key değerlerini kontrol et.")
         return 1
     log.info(f"{C['green']}Bağlantı başarılı.{C['reset']} Admin panelinde bot 'Çalışıyor' görünmeli.")
-    log.info(f"İzleme listesinde {len(conf.get('watchlist', []))} hesap var. Onaysız yayınla: {'açık' if conf.get('autoPublish') else 'kapalı'}")
+    log.info(
+        f"İzleme listesi: {len(conf.get('watchlist', []))} hesap, sitedeki bilinen yayıncılar: {len(conf.get('knownUsernames', []))}. "
+        f"Onaysız yayınla: {'açık' if conf.get('autoPublish') else 'kapalı'}"
+    )
     return 0
 
 
@@ -601,13 +1040,29 @@ async def cmd_check(cfg: Config, username: str) -> int:
     u = clean_username(username)
     log.info(f"@{u} kontrol ediliyor...")
     try:
-        live = await bot.is_live(u)
+        live, room = await bot.user_live(u)
     except Exception as e:
         log.error(f"Kontrol edilemedi: {type(e).__name__}: {e}")
         return 1
     finally:
         await bot.api.close()
-    log.info(f"@{u} şu an {'canlı' if live else 'canlı değil'}")
+    log.info(f"@{u} şu an {'canlı (oda ' + str(room) + ')' if live else 'canlı değil'}")
+    return 0
+
+
+def cmd_stats(cfg: Config) -> int:
+    path = BASE_DIR / cfg.data_file if not Path(cfg.data_file).is_absolute() else Path(cfg.data_file)
+    if not path.exists():
+        log.info("Henüz keşif verisi yok.")
+        return 0
+    pool = Pool(path)
+    st = pool.stats(time.time())
+    log.info(
+        f"Havuz: {st['pool']} hesap, son 24 saatte {st['discoveredToday']} yeni, "
+        f"son 30 dk'da canlı görülen {st['liveRecently']}, sandık görülen {st['withChests']}"
+    )
+    for r in pool.top():
+        log.info(f"  @{r['username']:<24} {r['chest_hits']:>4} sandıklı yoklama, toplam {coins_text(r['coins_total'])} jeton")
     return 0
 
 
@@ -616,25 +1071,28 @@ def main() -> int:
     ap.add_argument("--config", default=str(BASE_DIR / "config.json"), help="Ayar dosyası (varsayılan: config.json)")
     ap.add_argument("--test", action="store_true", help="Site bağlantısını ve API anahtarını dene")
     ap.add_argument("--check", metavar="KULLANICI", help="Tek bir hesabın canlı olup olmadığını dene")
+    ap.add_argument("--stats", action="store_true", help="Keşif havuzunun özetini göster")
     ap.add_argument("-v", "--verbose", action="store_true", help="Ayrıntılı kayıt")
     args = ap.parse_args()
 
     setup_logging(args.verbose)
     cfg_path = Path(args.config)
     if not cfg_path.exists() and not os.environ.get("TJ_API_KEY"):
-        example = BASE_DIR / "config.example.json"
-        log.error(f"{cfg_path.name} bulunamadı. {example.name} dosyasını {cfg_path.name} adıyla kopyalayıp doldur.")
+        log.error(f"{cfg_path.name} bulunamadı. config.example.json dosyasını {cfg_path.name} adıyla kopyalayıp doldur.")
         return 1
     cfg = Config.load(cfg_path)
+    if args.stats:
+        return cmd_stats(cfg)
     err = cfg.validate()
     if err:
         log.error(err)
         return 1
-
     if args.test:
         return asyncio.run(cmd_test(cfg))
     if args.check:
         return asyncio.run(cmd_check(cfg, args.check))
+
+    setup_logging(args.verbose, cfg.log_file)
 
     async def runner() -> None:
         bot = Bot(cfg)
@@ -643,14 +1101,8 @@ def main() -> int:
             try:
                 loop.add_signal_handler(sig, bot.stopping.set)
             except (NotImplementedError, RuntimeError):
-                pass  # Windows: Ctrl+C KeyboardInterrupt olarak gelir
-        try:
-            await bot.run()
-        except asyncio.CancelledError:
-            pass
-        finally:
-            if not bot.stopping.is_set():
-                bot.stopping.set()
+                pass
+        await bot.run()
 
     try:
         asyncio.run(runner())

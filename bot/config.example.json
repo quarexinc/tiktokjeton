@@ -1,9 +1,24 @@
 {
   "site_url": "https://tiktokjeton.vercel.app",
   "api_key": "BURAYA_API_ANAHTARI",
-  "extra_usernames": [],
-  "check_interval_sec": 120,
-  "max_connections": 25,
+
+  "discovery": true,
+  "feed_discovery": true,
+  "seed_usernames": [],
+
+  "max_connections": 40,
+  "probe_seconds": 120,
+  "linger_minutes": 8,
+  "start_interval_sec": 2.0,
+
+  "probe_cooldown_min": 25,
+  "hot_cooldown_min": 6,
+  "pinned_check_sec": 120,
+
+  "pool_max": 30000,
+  "data_file": "kesif.db",
+  "log_file": "logs/bot.log",
+
   "heartbeat_sec": 60,
   "keepalive_sec": 180,
   "sign_api_key": "",
