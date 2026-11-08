@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { CalendarClock, Clock3, Coins, ExternalLink, History, Star, UserRound } from "lucide-react";
+import { CalendarClock, Clock3, Coins, Eye, ExternalLink, Gift, History, Star, UserRound } from "lucide-react";
 import { CoinMark } from "./Coin";
 import { endTime, formatAgo, formatCoins, formatDuration, profileUrl } from "@/lib/status";
 import type { Stream } from "@/lib/types";
@@ -34,6 +34,34 @@ function CoinBlock({ coins, dim = false }: { coins: number | null; dim?: boolean
         </div>
       ) : (
         <div className="text-[15px] font-semibold text-gold-soft">Jetonlu yayın</div>
+      )}
+    </div>
+  );
+}
+
+function ChestInfo({ s, now }: { s: Stream; now: number }) {
+  const chests = s.chests ?? 0;
+  const next = s.nextChestAt ? new Date(s.nextChestAt).getTime() - now : null;
+  if (!chests && s.viewers == null) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-[13px]">
+      {chests > 0 && (
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-gold/15 px-2.5 py-1 font-semibold text-gold-soft">
+          <Gift className="size-3.5" aria-hidden="true" />
+          {chests} sandık
+        </span>
+      )}
+      {chests > 0 && next !== null && (
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-gold/30 px-2.5 py-1 font-semibold text-gold tabular-nums">
+          <Clock3 className="size-3.5" aria-hidden="true" />
+          {next > 0 ? `Sonraki sandık ${formatDuration(next)}` : "Sandık açılıyor"}
+        </span>
+      )}
+      {s.viewers != null && s.viewers > 0 && (
+        <span className="inline-flex items-center gap-1.5 text-muted tabular-nums">
+          <Eye className="size-3.5" aria-hidden="true" />
+          {s.viewers.toLocaleString("tr-TR")} izleyici
+        </span>
       )}
     </div>
   );
@@ -83,6 +111,7 @@ export function LiveCard({ s, now, index }: { s: Stream; now: number; index: num
 
         {s.title && <h3 className="font-display text-xl leading-snug font-bold text-balance">{s.title}</h3>}
         {s.note && <p className="max-w-prose text-[15px] leading-relaxed text-muted">{s.note}</p>}
+        <ChestInfo s={s} now={now} />
 
         <div className="mt-auto space-y-1.5">
           <div className="time-track" role="progressbar" aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100} aria-label="Ana sayfada kalan süre">

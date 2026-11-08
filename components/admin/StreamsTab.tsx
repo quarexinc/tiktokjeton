@@ -3,7 +3,10 @@
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  Bot,
   CalendarClock,
+  CircleCheck,
+  Gift,
   CircleStop,
   Coins,
   History,
@@ -60,7 +63,8 @@ export default function StreamsTab() {
     setPending(null);
   }
 
-  const { live, upcoming, past } = splitStreams(state.db.streams, now);
+  const waiting = state.db.streams.filter((s) => s.pending && endTime(s) > now);
+  const { live, upcoming, past } = splitStreams(state.db.streams.filter((s) => !s.pending), now);
   const clicks = state.clicks;
 
   const rowProps = (s: Stream) => ({ s, busy: pending === s.id, clicks: clicks[s.id] ?? 0 });
@@ -81,6 +85,23 @@ export default function StreamsTab() {
         </div>
 
         <div className="space-y-6">
+          {waiting.length > 0 && (
+            <ListSection title="Onay bekleyen" icon={Bot} tone="text-gold" count={waiting.length} empty="">
+              {waiting.map((s) => (
+                <Row key={s.id} {...rowProps(s)} status={`Bot buldu, ${formatAgo(now - new Date(s.createdAt).getTime())}`} statusTone="text-gold">
+                  <button
+                    onClick={() => act(s, { action: "approve" }, "Yayın onaylandı ve ana sayfaya eklendi")}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-gold px-3 py-2 text-[13px] font-bold text-ink hover:bg-gold-soft"
+                  >
+                    <CircleCheck className="size-4" aria-hidden="true" />
+                    Onayla
+                  </button>
+                  <IconBtn label="Reddet ve sil" icon={Trash2} danger onClick={() => remove(s)} />
+                </Row>
+              ))}
+            </ListSection>
+          )}
+
           <ListSection title="Aktif" icon={Radio} tone="text-live" count={live.length} empty="Şu an aktif yayın yok.">
             {live.map((s) => (
               <Row key={s.id} {...rowProps(s)} status={`${formatDuration(endTime(s) - now)} kaldı`} statusTone="text-live">
@@ -191,6 +212,18 @@ function Row({
             @{s.username}
           </a>
           {s.featured && <Star className="size-3.5 fill-gold text-gold" aria-label="Öne çıkan" />}
+          {s.source === "bot" && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-cyan/15 px-2 py-0.5 text-[11px] font-bold text-cyan" title="Bot ekledi">
+              <Bot className="size-3" aria-hidden="true" />
+              Bot
+            </span>
+          )}
+          {(s.chests ?? 0) > 0 && (
+            <span className="inline-flex items-center gap-1 text-[13px] text-gold-soft tabular-nums">
+              <Gift className="size-3.5" aria-hidden="true" />
+              {s.chests}
+            </span>
+          )}
           {s.coins !== null && (
             <span className="inline-flex items-center gap-1 text-[13px] text-gold tabular-nums">
               <Coins className="size-3.5" aria-hidden="true" />

@@ -2,24 +2,27 @@
 
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { AnimatePresence, MotionConfig, motion } from "framer-motion";
-import { ExternalLink, Gauge, KeyRound, LogOut, Radio, Settings2, TriangleAlert, type LucideIcon } from "lucide-react";
+import { Bot, ExternalLink, Gauge, KeyRound, LogOut, Radio, Settings2, TriangleAlert, type LucideIcon } from "lucide-react";
 import { CoinMark } from "../Coin";
 import OverviewTab from "./OverviewTab";
 import StreamsTab from "./StreamsTab";
 import KeysTab from "./KeysTab";
 import SettingsTab from "./SettingsTab";
+import BotTab from "./BotTab";
 import type { DB, MemberKey, Overview } from "@/lib/types";
+import type { BotAdminView } from "@/lib/bot";
 
 export type AdminState = {
   db: DB;
   clicks: Record<string, number>;
   keys: MemberKey[];
   overview: Overview;
+  bot: BotAdminView;
   now: number;
 };
 
 type Toast = { id: number; text: string; tone: "ok" | "err" };
-type TabId = "overview" | "streams" | "keys" | "settings";
+type TabId = "overview" | "streams" | "keys" | "bot" | "settings";
 
 type Ctx = {
   state: AdminState;
@@ -39,6 +42,7 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Genel bakış", icon: Gauge },
   { id: "streams", label: "Yayınlar", icon: Radio },
   { id: "keys", label: "Anahtarlar", icon: KeyRound },
+  { id: "bot", label: "Otomasyon", icon: Bot },
   { id: "settings", label: "Ayarlar", icon: Settings2 },
 ];
 
@@ -179,6 +183,7 @@ export default function AdminApp({ initial, storageError }: { initial: AdminStat
                 {tab === "overview" && <OverviewTab />}
                 {tab === "streams" && <StreamsTab />}
                 {tab === "keys" && <KeysTab />}
+                {tab === "bot" && <BotTab />}
                 {tab === "settings" && <SettingsTab />}
               </motion.div>
             </AnimatePresence>

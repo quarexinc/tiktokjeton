@@ -35,6 +35,11 @@ export const PATCH = adminRoute(async (req: Request, { params }: Ctx) => {
       logMsg = `@${s.username} yayını bitirildi`;
       return;
     }
+    if (body.action === "approve") {
+      s.pending = false;
+      logMsg = `@${s.username} bot yayını onaylandı`;
+      return;
+    }
     if (body.action === "feature") {
       s.featured = Boolean(body.value);
       logMsg = `@${s.username} ${s.featured ? "öne çıkarıldı" : "öne çıkanlardan kaldırıldı"}`;

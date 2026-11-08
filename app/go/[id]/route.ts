@@ -13,7 +13,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     if (!access.allowed) return NextResponse.redirect(home, 303);
     const db = await readDB();
     const s = db.streams.find((x) => x.id === id);
-    if (!s) return NextResponse.redirect(home, 303);
+    if (!s || (s.pending && !access.admin)) return NextResponse.redirect(home, 303);
     if (!access.admin) await addClick(s.id);
     return NextResponse.redirect(s.url, 302);
   } catch (e) {

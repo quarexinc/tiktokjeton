@@ -3,7 +3,8 @@ import { adminKeyConfigured, isAdmin } from "@/lib/auth";
 import { getClicks, getOverview, listKeys, readDB, storageKind } from "@/lib/store";
 import Login from "@/components/admin/Login";
 import AdminApp, { type AdminState } from "@/components/admin/AdminApp";
-import { DEFAULT_SETTINGS } from "@/lib/types";
+import { DEFAULT_BOT, DEFAULT_SETTINGS } from "@/lib/types";
+import { adminView, getBot } from "@/lib/bot";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = {
@@ -23,8 +24,8 @@ export default async function AdminPage() {
 
   let state: AdminState;
   try {
-    const [db, clicks, keys, overview] = await Promise.all([readDB(), getClicks(), listKeys(), getOverview()]);
-    state = { db, clicks, keys, overview, now: Date.now() };
+    const [db, clicks, keys, overview, bot] = await Promise.all([readDB(), getClicks(), listKeys(), getOverview(), getBot()]);
+    state = { db, clicks, keys, overview, bot: adminView(bot), now: Date.now() };
   } catch (e) {
     console.error(e);
     storageError = "Depolamaya ulaşılamadı. Vercel projesindeki Storage bağlantısını kontrol et.";
@@ -33,6 +34,7 @@ export default async function AdminPage() {
       clicks: {},
       keys: [],
       overview: { clicks: {}, log: [], loginsByDay: [], clicksByDay: [], storage: storageKind() },
+      bot: adminView(DEFAULT_BOT),
       now: Date.now(),
     };
   }

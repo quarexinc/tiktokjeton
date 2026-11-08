@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import {
   Activity,
+  Bot,
   CalendarClock,
   KeyRound,
   LogIn,
@@ -36,6 +37,7 @@ const LOG_ICON: Record<LogEntry["type"], { icon: LucideIcon; tone: string }> = {
   stream_updated: { icon: Radio, tone: "text-muted" },
   stream_deleted: { icon: Trash2, tone: "text-live" },
   settings: { icon: Settings2, tone: "text-muted" },
+  bot: { icon: Bot, tone: "text-cyan" },
 };
 
 export default function OverviewTab() {
@@ -48,7 +50,7 @@ export default function OverviewTab() {
     return () => clearInterval(t);
   }, [refreshOverview]);
 
-  const { live, upcoming } = splitStreams(db.streams, now);
+  const { live, upcoming } = splitStreams(db.streams.filter((s) => !s.pending), now);
   const activeKeys = keys.filter((k) => k.activatedAt && sessionValid(k, now)).length;
   const unusedKeys = keys.filter((k) => keyStatus(k, now) === "unused").length;
   const today = overview.loginsByDay.at(-1)?.count ?? 0;

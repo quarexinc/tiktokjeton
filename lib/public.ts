@@ -14,7 +14,7 @@ export type PublicPayload = {
 export async function getPublicPayload(): Promise<PublicPayload> {
   const db = await readDB();
   const now = Date.now();
-  const { live, upcoming, past } = splitStreams(db.streams, now);
+  const { live, upcoming, past } = splitStreams(db.streams.filter((s) => !s.pending), now);
   const keptPast = db.settings.showPast ? past.slice(0, db.settings.pastLimit) : [];
   return {
     now,

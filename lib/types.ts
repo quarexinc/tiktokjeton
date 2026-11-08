@@ -13,7 +13,48 @@ export type Stream = {
   endedAt: string | null;
   /** Listenin en üstünde vurgulu gösterilir */
   featured?: boolean;
+  /** Kim ekledi: admin elle mi, bot mu */
+  source?: "manual" | "bot";
+  /** Bot ekledi ve admin onayı bekliyor; ana sayfada görünmez */
+  pending?: boolean;
+  /** Yayında şu an açılmayı bekleyen sandık sayısı (bot doldurur) */
+  chests?: number | null;
+  /** Bir sonraki sandığın açılacağı an (ISO) */
+  nextChestAt?: string | null;
+  viewers?: number | null;
+  /** Botun bu yayın için son bilgi gönderdiği an */
+  botSeenAt?: string | null;
   createdAt: string;
+};
+
+/** Otomatik tarama botunun ayarları ve durumu */
+export type BotConfig = {
+  /** API anahtarının sha256 özeti; anahtarın kendisi saklanmaz */
+  tokenHash: string | null;
+  tokenHint: string | null;
+  tokenCreatedAt: string | null;
+  /** Bot yayınları onaysız doğrudan ana sayfaya düşsün mü */
+  autoPublish: boolean;
+  /** Bot yayını ana sayfada en az bu kadar kalır; her raporda yenilenir (dk) */
+  defaultDurationMin: number;
+  /** Bu miktarın altındaki sandıklı yayınlar eklenmez */
+  minCoins: number;
+  /** Botun takip edeceği TikTok kullanıcı adları */
+  watchlist: string[];
+  lastSeenAt: string | null;
+  lastStatus: { watching: number; live: number; connected: number; version: string; host: string } | null;
+};
+
+export const DEFAULT_BOT: BotConfig = {
+  tokenHash: null,
+  tokenHint: null,
+  tokenCreatedAt: null,
+  autoPublish: true,
+  defaultDurationMin: 20,
+  minCoins: 0,
+  watchlist: [],
+  lastSeenAt: null,
+  lastStatus: null,
 };
 
 export type Settings = {
@@ -83,7 +124,8 @@ export type LogEntry = {
     | "stream_added"
     | "stream_updated"
     | "stream_deleted"
-    | "settings";
+    | "settings"
+    | "bot";
   msg: string;
 };
 
