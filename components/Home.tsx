@@ -1,37 +1,114 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { AnimatePresence, MotionConfig, motion } from "framer-motion";
-import { CalendarClock, History, Megaphone, Radio, RefreshCw } from "lucide-react";
+import {
+  ArrowDownWideNarrow,
+  Bell,
+  BellOff,
+  CalendarClock,
+  ExternalLink,
+  History,
+  KeyRound,
+  LayoutDashboard,
+  LogOut,
+  Megaphone,
+  Radio,
+  RefreshCw,
+  Search,
+  X,
+} from "lucide-react";
 import { CoinMark, SpinningCoin } from "./Coin";
 import { EmptyState, LiveCard, PastRow, UpcomingCard } from "./StreamItems";
-import { splitStreams } from "@/lib/status";
+import { endTime, formatDuration, splitStreams } from "@/lib/status";
 import type { PublicPayload } from "@/lib/public";
+import type { Stream } from "@/lib/types";
 
 type Tab = "live" | "upcoming" | "past";
+type Sort = "new" | "coins" | "ending";
 const POLL_MS = 30_000;
 
-export default function Home({ initial }: { initial: PublicPayload }) {
+export type Viewer = {
+  admin: boolean;
+  member: { code: string; expiresAt: string | null; usesLeft: number | null } | null;
+};
+
+function store(key: string, value?: string): string | null {
+  try {
+    if (value === undefined) return localStorage.getItem(key);
+    localStorage.setItem(key, value);
+  } catch {}
+  return null;
+}
+
+function chime() {
+  try {
+    const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const ctx = new Ctx();
+    const notes = [880, 1318.5];
+    notes.forEach((f, i) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = "sine";
+      o.frequency.value = f;
+      const t = ctx.currentTime + i * 0.14;
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.18, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+      o.connect(g).connect(ctx.destination);
+      o.start(t);
+      o.stop(t + 0.4);
+    });
+  } catch {}
+}
+
+export default function Home({ initial, viewer }: { initial: PublicPayload; viewer: Viewer }) {
   const [data, setData] = useState(initial);
   const [now, setNow] = useState(initial.now);
   const [refreshing, setRefreshing] = useState(false);
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<Sort>("new");
+  const [alerts, setAlerts] = useState(false);
+  const [fresh, setFresh] = useState<Stream[]>([]);
+  const seenLive = useRef<Set<string>>(new Set(splitStreams(initial.streams, initial.now).live.map((s) => s.id)));
 
-  // Saniyelik saat: geri sayımlar ve aktif → geçmiş geçişi
   useEffect(() => {
+    setAlerts(store("tjyb_alerts") === "1");
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
 
-  async function refresh() {
+  const alertsRef = useRef(alerts);
+  alertsRef.current = alerts;
+
+  const refresh = useCallback(async () => {
     setRefreshing(true);
     try {
       const r = await fetch("/api/streams", { cache: "no-store" });
-      if (r.ok) setData(await r.json());
+      if (r.status === 401) {
+        window.location.reload();
+        return;
+      }
+      if (!r.ok) return;
+      const next: PublicPayload = await r.json();
+      setData(next);
+      const { live } = splitStreams(next.streams, Date.now());
+      const added = live.filter((s) => !seenLive.current.has(s.id));
+      live.forEach((s) => seenLive.current.add(s.id));
+      if (added.length) {
+        setFresh((f) => [...added, ...f].slice(0, 3));
+        if (alertsRef.current) {
+          chime();
+          if (document.visibilityState === "hidden" && "Notification" in window && Notification.permission === "granted") {
+            new Notification("Yeni jetonlu yayın", { body: added.map((s) => `@${s.username}`).join(", "), icon: "/icon.svg" });
+          }
+        }
+      }
     } finally {
       setRefreshing(false);
     }
-  }
+  }, []);
 
   useEffect(() => {
     const t = setInterval(refresh, POLL_MS);
@@ -41,9 +118,64 @@ export default function Home({ initial }: { initial: PublicPayload }) {
       clearInterval(t);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, []);
+  }, [refresh]);
 
-  const { live, upcoming, past } = useMemo(() => splitStreams(data.streams, now), [data.streams, now]);
+  // Aktif yayına geçince ilk listede olmayanları da "görüldü" say (zamanlanmış yayın başlayınca bildir)
+  const split = useMemo(() => splitStreams(data.streams, now), [data.streams, now]);
+  useEffect(() => {
+    const added = split.live.filter((s) => !seenLive.current.has(s.id));
+    if (!added.length) return;
+    added.forEach((s) => seenLive.current.add(s.id));
+    setFresh((f) => [...added, ...f].slice(0, 3));
+    if (alertsRef.current) chime();
+  }, [split.live]);
+
+  useEffect(() => {
+    document.title = split.live.length ? `(${split.live.length}) Tiktok Jetonlu Yayın Bulma` : "Tiktok Jetonlu Yayın Bulma";
+  }, [split.live.length]);
+
+  useEffect(() => {
+    if (!fresh.length) return;
+    const t = setTimeout(() => setFresh((f) => f.slice(0, -1)), 9000);
+    return () => clearTimeout(t);
+  }, [fresh]);
+
+  async function toggleAlerts() {
+    const next = !alerts;
+    setAlerts(next);
+    store("tjyb_alerts", next ? "1" : "0");
+    if (next) {
+      chime();
+      if ("Notification" in window && Notification.permission === "default") {
+        try {
+          await Notification.requestPermission();
+        } catch {}
+      }
+    }
+  }
+
+  async function logout() {
+    await fetch("/api/member/logout", { method: "POST" });
+    window.location.reload();
+  }
+
+  const q = query.trim().toLowerCase().replace(/^@/, "");
+  const filter = (list: Stream[]) =>
+    q ? list.filter((s) => s.username.toLowerCase().includes(q) || s.title.toLowerCase().includes(q)) : list;
+
+  const live = useMemo(() => {
+    const list = [...filter(split.live)];
+    const cmp: Record<Sort, (a: Stream, b: Stream) => number> = {
+      new: (a, b) => +new Date(b.startsAt) - +new Date(a.startsAt),
+      coins: (a, b) => (b.coins ?? -1) - (a.coins ?? -1),
+      ending: (a, b) => endTime(a) - endTime(b),
+    };
+    return list.sort((a, b) => Number(Boolean(b.featured)) - Number(Boolean(a.featured)) || cmp[sort](a, b));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [split.live, q, sort]);
+  const upcoming = filter(split.upcoming);
+  const past = filter(split.past);
+
   const [tab, setTab] = useState<Tab>(() => {
     const s = splitStreams(initial.streams, initial.now);
     return s.live.length ? "live" : s.upcoming.length ? "upcoming" : "live";
@@ -55,27 +187,71 @@ export default function Home({ initial }: { initial: PublicPayload }) {
     ...(data.showPast ? [{ id: "past" as Tab, label: "Geçmiş", count: past.length, icon: History }] : []),
   ];
 
+  const member = viewer.member;
+  const memberLeft = member?.expiresAt ? new Date(member.expiresAt).getTime() - now : null;
+
   return (
     <MotionConfig reducedMotion="user">
       <div className="grain pointer-events-none fixed inset-0 z-0" aria-hidden="true" />
       <div className="relative z-10 mx-auto flex min-h-dvh max-w-4xl flex-col px-4 sm:px-6">
-        <header className="flex items-center justify-between py-5">
-          <Link href="/" className="flex items-center gap-2.5 font-display text-[17px] font-bold">
+        <header className="flex items-center justify-between gap-3 py-5">
+          <Link href="/" className="flex min-w-0 items-center gap-2.5 font-display text-[17px] font-bold">
             <CoinMark size={30} />
-            <span>Tiktok Jetonlu Yayın Bulma</span>
+            <span className="truncate">Tiktok Jetonlu Yayın Bulma</span>
           </Link>
-          <button
-            onClick={refresh}
-            className="grid size-10 place-items-center rounded-full border border-line text-muted transition-colors hover:text-text"
-            aria-label="Listeyi yenile"
-            title="Listeyi yenile"
-          >
-            <RefreshCw className={`size-4 ${refreshing ? "animate-spin" : ""}`} aria-hidden="true" />
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            {viewer.admin && (
+              <Link
+                href="/admin"
+                className="hidden items-center gap-1.5 rounded-full border border-line px-3 py-2 text-[13px] font-semibold text-muted hover:text-text sm:inline-flex"
+              >
+                <LayoutDashboard className="size-3.5" aria-hidden="true" />
+                Yönetim
+              </Link>
+            )}
+            {member && (
+              <span
+                className="hidden items-center gap-1.5 rounded-full border border-line px-3 py-2 text-[13px] text-muted tabular-nums sm:inline-flex"
+                title={member.code}
+              >
+                <KeyRound className="size-3.5 text-gold" aria-hidden="true" />
+                {memberLeft === null ? "Süresiz üyelik" : `${formatDuration(memberLeft)} kaldı`}
+              </span>
+            )}
+            <button
+              onClick={toggleAlerts}
+              className={`grid size-10 place-items-center rounded-full border transition-colors ${
+                alerts ? "border-gold/50 bg-gold/10 text-gold" : "border-line text-muted hover:text-text"
+              }`}
+              aria-pressed={alerts}
+              aria-label={alerts ? "Yeni yayın bildirimini kapat" : "Yeni yayın bildirimini aç"}
+              title={alerts ? "Bildirim açık" : "Yeni yayın açılınca sesli bildir"}
+            >
+              {alerts ? <Bell className="size-4" aria-hidden="true" /> : <BellOff className="size-4" aria-hidden="true" />}
+            </button>
+            <button
+              onClick={refresh}
+              className="grid size-10 place-items-center rounded-full border border-line text-muted transition-colors hover:text-text"
+              aria-label="Listeyi yenile"
+              title="Listeyi yenile"
+            >
+              <RefreshCw className={`size-4 ${refreshing ? "animate-spin" : ""}`} aria-hidden="true" />
+            </button>
+            {member && (
+              <button
+                onClick={logout}
+                className="grid size-10 place-items-center rounded-full border border-line text-muted transition-colors hover:text-live"
+                aria-label="Çıkış yap"
+                title="Çıkış yap"
+              >
+                <LogOut className="size-4" aria-hidden="true" />
+              </button>
+            )}
+          </div>
         </header>
 
         {/* Açılış sahnesi */}
-        <section className="hero-glow relative -mx-4 grid items-center gap-6 px-4 pt-6 pb-10 sm:-mx-6 sm:grid-cols-[1fr_auto] sm:px-6 sm:pt-12 sm:pb-14">
+        <section className="hero-glow relative -mx-4 grid items-center gap-6 px-4 pt-4 pb-10 sm:-mx-6 sm:grid-cols-[1fr_auto] sm:px-6 sm:pt-10 sm:pb-12">
           <div className="order-2 sm:order-1">
             <motion.h1
               initial={{ opacity: 0, y: 24 }}
@@ -97,17 +273,25 @@ export default function Home({ initial }: { initial: PublicPayload }) {
               initial={{ opacity: 0, scale: 0.9 }}
               animate={{ opacity: 1, scale: 1 }}
               transition={{ delay: 1.05, type: "spring", stiffness: 220, damping: 18 }}
-              className="mt-6 inline-flex items-center gap-2.5 rounded-full border border-line bg-ink-2 px-4 py-2 text-[15px]"
+              className="mt-6 flex flex-wrap items-center gap-2"
             >
-              {live.length > 0 ? (
-                <>
-                  <span className="live-dot" />
-                  <span>
-                    <b className="font-display tabular-nums">{live.length}</b> yayın şu an açık
-                  </span>
-                </>
-              ) : (
-                <span className="text-muted">Şu an açık yayın yok</span>
+              <span className="inline-flex items-center gap-2.5 rounded-full border border-line bg-ink-2 px-4 py-2 text-[15px]">
+                {split.live.length > 0 ? (
+                  <>
+                    <span className="live-dot" />
+                    <span>
+                      <b className="font-display tabular-nums">{split.live.length}</b> yayın şu an açık
+                    </span>
+                  </>
+                ) : (
+                  <span className="text-muted">Şu an açık yayın yok</span>
+                )}
+              </span>
+              {member && (
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-ink-2 px-3.5 py-2 text-[14px] text-muted tabular-nums sm:hidden">
+                  <KeyRound className="size-3.5 text-gold" aria-hidden="true" />
+                  {memberLeft === null ? "Süresiz" : `${formatDuration(memberLeft)} kaldı`}
+                </span>
               )}
             </motion.div>
           </div>
@@ -122,7 +306,7 @@ export default function Home({ initial }: { initial: PublicPayload }) {
               <SpinningCoin size={220} />
             </div>
             <div className="sm:hidden">
-              <SpinningCoin size={120} />
+              <SpinningCoin size={110} />
             </div>
             <motion.div
               aria-hidden="true"
@@ -152,7 +336,7 @@ export default function Home({ initial }: { initial: PublicPayload }) {
           transition={{ delay: 1.2, type: "spring", stiffness: 160, damping: 22 }}
           className="flex-1 pb-16"
         >
-          <div role="tablist" aria-label="Yayın listeleri" className="mb-5 flex gap-1 overflow-x-auto rounded-2xl border border-line bg-ink-2 p-1">
+          <div role="tablist" aria-label="Yayın listeleri" className="flex gap-1 overflow-x-auto rounded-2xl border border-line bg-ink-2 p-1">
             {tabs.map((t) => {
               const active = tab === t.id;
               const Icon = t.icon;
@@ -162,7 +346,7 @@ export default function Home({ initial }: { initial: PublicPayload }) {
                   role="tab"
                   aria-selected={active}
                   onClick={() => setTab(t.id)}
-                  className={`relative flex flex-1 items-center justify-center gap-1.5 rounded-xl px-2.5 py-2.5 text-[14px] sm:gap-2 sm:px-3 sm:text-[15px] font-semibold whitespace-nowrap transition-colors ${
+                  className={`relative flex flex-1 items-center justify-center gap-1.5 rounded-xl px-2.5 py-2.5 text-[14px] font-semibold whitespace-nowrap transition-colors sm:gap-2 sm:px-3 sm:text-[15px] ${
                     active ? "text-ink" : "text-muted hover:text-text"
                   }`}
                 >
@@ -184,6 +368,39 @@ export default function Home({ initial }: { initial: PublicPayload }) {
             })}
           </div>
 
+          <div className="mt-3 mb-5 flex gap-2">
+            <label className="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-line bg-ink-2 px-3 focus-within:border-gold">
+              <Search className="size-4 shrink-0 text-muted" aria-hidden="true" />
+              <span className="sr-only">Yayın ara</span>
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Kullanıcı adı veya başlık ara"
+                className="min-w-0 flex-1 bg-transparent py-2.5 text-[15px] outline-none placeholder:text-muted/70"
+              />
+              {query && (
+                <button onClick={() => setQuery("")} className="text-muted hover:text-text" aria-label="Aramayı temizle">
+                  <X className="size-4" />
+                </button>
+              )}
+            </label>
+            {tab === "live" && (
+              <label className="flex items-center gap-2 rounded-xl border border-line bg-ink-2 pl-3 focus-within:border-gold">
+                <ArrowDownWideNarrow className="size-4 text-muted" aria-hidden="true" />
+                <span className="sr-only">Sırala</span>
+                <select
+                  value={sort}
+                  onChange={(e) => setSort(e.target.value as Sort)}
+                  className="bg-transparent py-2.5 pr-3 text-[14px] font-semibold text-text outline-none"
+                >
+                  <option value="new">En yeni</option>
+                  <option value="coins">En çok jeton</option>
+                  <option value="ending">Bitişi yakın</option>
+                </select>
+              </label>
+            )}
+          </div>
+
           <AnimatePresence mode="wait">
             <motion.div key={tab} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
               {tab === "live" &&
@@ -196,7 +413,7 @@ export default function Home({ initial }: { initial: PublicPayload }) {
                     </AnimatePresence>
                   </div>
                 ) : (
-                  <EmptyState kind="live" />
+                  <EmptyState kind="live" query={q ? query : undefined} />
                 ))}
 
               {tab === "upcoming" &&
@@ -207,7 +424,7 @@ export default function Home({ initial }: { initial: PublicPayload }) {
                     ))}
                   </div>
                 ) : (
-                  <EmptyState kind="upcoming" />
+                  <EmptyState kind="upcoming" query={q ? query : undefined} />
                 ))}
 
               {tab === "past" &&
@@ -218,7 +435,7 @@ export default function Home({ initial }: { initial: PublicPayload }) {
                     ))}
                   </ul>
                 ) : (
-                  <EmptyState kind="past" />
+                  <EmptyState kind="past" query={q ? query : undefined} />
                 ))}
             </motion.div>
           </AnimatePresence>
@@ -230,6 +447,45 @@ export default function Home({ initial }: { initial: PublicPayload }) {
             Yönetim
           </Link>
         </footer>
+      </div>
+
+      {/* Yeni yayın bildirimleri */}
+      <div className="fixed inset-x-0 top-3 z-50 flex flex-col items-center gap-2 px-3" aria-live="polite">
+        <AnimatePresence>
+          {fresh.map((s) => (
+            <motion.div
+              key={s.id}
+              layout
+              initial={{ opacity: 0, y: -24, scale: 0.95 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -12 }}
+              transition={{ type: "spring", stiffness: 300, damping: 24 }}
+              className="flex w-full max-w-md items-center gap-3 rounded-2xl border border-gold/40 bg-ink-2/95 p-3 pl-4 shadow-2xl backdrop-blur"
+            >
+              <span className="live-dot shrink-0" />
+              <div className="min-w-0 flex-1">
+                <p className="text-[13px] text-muted">Yeni yayın açıldı</p>
+                <p className="truncate font-semibold">@{s.username}</p>
+              </div>
+              <a
+                href={`/go/${s.id}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 rounded-xl bg-gold px-3.5 py-2 text-[14px] font-bold text-ink hover:bg-gold-soft"
+              >
+                Yayına git
+                <ExternalLink className="size-3.5" aria-hidden="true" />
+              </a>
+              <button
+                onClick={() => setFresh((f) => f.filter((x) => x.id !== s.id))}
+                className="grid size-8 place-items-center rounded-lg text-muted hover:text-text"
+                aria-label="Kapat"
+              >
+                <X className="size-4" />
+              </button>
+            </motion.div>
+          ))}
+        </AnimatePresence>
       </div>
     </MotionConfig>
   );

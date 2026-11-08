@@ -46,6 +46,12 @@ body {
   outline-offset: 3px;
   border-radius: 10px;
 }
+/* Metin alanlarında odak, çerçeve rengiyle gösterilir */
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+}
 
 /* ---------- Jeton (3B dönen para) ---------- */
 .coin-stage {

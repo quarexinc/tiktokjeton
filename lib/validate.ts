@@ -1,5 +1,5 @@
 import { liveUrl } from "./status";
-import type { Settings, Stream } from "./types";
+import type { MemberKey, Settings, Stream } from "./types";
 
 export type StreamInput = {
   username?: unknown;
@@ -9,6 +9,7 @@ export type StreamInput = {
   note?: unknown;
   startsAt?: unknown;
   durationMin?: unknown;
+  featured?: unknown;
 };
 
 type Result<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -71,7 +72,9 @@ export function parseStreamInput(
     durationMin = Math.round(n);
   }
 
-  return { ok: true, value: { username, title, url, coins, note, startsAt, durationMin } };
+  const featured = input.featured !== undefined ? Boolean(input.featured) : existing?.featured ?? false;
+
+  return { ok: true, value: { username, title, url, coins, note, startsAt, durationMin, featured } };
 }
 
 export function parseSettings(input: Partial<Record<keyof Settings, unknown>>, current: Settings): Result<Settings> {
@@ -85,5 +88,51 @@ export function parseSettings(input: Partial<Record<keyof Settings, unknown>>, c
     }
     next.pastLimit = Math.round(n);
   }
+  if (input.requireKey !== undefined) next.requireKey = Boolean(input.requireKey);
+  if (input.maintenance !== undefined) next.maintenance = Boolean(input.maintenance);
+  if (input.maintenanceText !== undefined) next.maintenanceText = str(input.maintenanceText, 200);
+  if (input.contactLabel !== undefined) next.contactLabel = str(input.contactLabel, 40) || "Anahtar al";
+  if (input.contactUrl !== undefined) {
+    const u = str(input.contactUrl, 300);
+    if (u) {
+      try {
+        const p = new URL(u);
+        if (!["https:", "http:", "tg:", "mailto:", "tel:"].includes(p.protocol)) throw new Error();
+      } catch {
+        return { ok: false, error: "İletişim linki geçerli bir adres olmalı (https://...)." };
+      }
+    }
+    next.contactUrl = u;
+  }
   return { ok: true, value: next };
+}
+
+export type KeyInput = {
+  count?: unknown;
+  label?: unknown;
+  maxUses?: unknown;
+  durationDays?: unknown;
+  startMode?: unknown;
+};
+
+export function parseKeyInput(
+  input: KeyInput
+): Result<{ count: number; label: string; maxUses: number | null; durationDays: number | null; startMode: MemberKey["startMode"] }> {
+  const count = input.count === undefined ? 1 : Math.round(Number(input.count));
+  if (!Number.isFinite(count) || count < 1 || count > 200) return { ok: false, error: "Tek seferde 1 ile 200 arası anahtar üretilebilir." };
+  const label = str(input.label, 60);
+  let maxUses: number | null = null;
+  if (input.maxUses !== undefined && input.maxUses !== null && input.maxUses !== "") {
+    const n = Math.round(Number(input.maxUses));
+    if (!Number.isFinite(n) || n < 1 || n > 100000) return { ok: false, error: "Giriş hakkı 1 ile 100.000 arasında olmalı." };
+    maxUses = n;
+  }
+  let durationDays: number | null = null;
+  if (input.durationDays !== undefined && input.durationDays !== null && input.durationDays !== "") {
+    const n = Number(input.durationDays);
+    if (!Number.isFinite(n) || n <= 0 || n > 3650) return { ok: false, error: "Üyelik süresi 1 ile 3650 gün arasında olmalı." };
+    durationDays = Math.round(n * 100) / 100;
+  }
+  const startMode = input.startMode === "created" ? "created" : "first-use";
+  return { ok: true, value: { count, label, maxUses, durationDays, startMode } };
 }

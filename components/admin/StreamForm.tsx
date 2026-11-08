@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { Loader2, Plus, Save, X } from "lucide-react";
+import { Loader2, Plus, Save, Star, X } from "lucide-react";
+import { Toggle } from "./ui";
 import type { Stream } from "@/lib/types";
 
 const PRESETS = [
@@ -38,6 +39,7 @@ export type StreamPayload = {
   note: string;
   startsAt: string | null;
   durationMin: number;
+  featured: boolean;
 };
 
 const field =
@@ -62,6 +64,7 @@ export default function StreamForm({
   const [startsAt, setStartsAt] = useState(editing ? toLocalInput(editing.startsAt) : "");
   const [amount, setAmount] = useState(String(init.amount));
   const [unit, setUnit] = useState<Unit>(init.unit);
+  const [featured, setFeatured] = useState(editing?.featured ?? false);
   const [busy, setBusy] = useState(false);
 
   const durationMin = Math.round(Number(amount) * UNIT_MIN[unit]);
@@ -84,6 +87,7 @@ export default function StreamForm({
       note,
       startsAt: startMode === "now" ? (editing ? new Date().toISOString() : null) : startsAt ? new Date(startsAt).toISOString() : null,
       durationMin,
+      featured,
     });
     setBusy(false);
     if (ok && !editing) {
@@ -94,6 +98,7 @@ export default function StreamForm({
       setNote("");
       setStartMode("now");
       setStartsAt("");
+      setFeatured(false);
     }
   }
 
@@ -219,6 +224,17 @@ export default function StreamForm({
         </div>
         <span className="mt-1 block text-[13px] text-muted">Süre dolunca yayın Geçmiş&apos;e taşınır.</span>
       </fieldset>
+
+      <label className="flex cursor-pointer items-center justify-between gap-4 rounded-xl border border-line bg-ink px-4 py-3">
+        <span className="flex items-center gap-2.5">
+          <Star className={`size-4 ${featured ? "fill-gold text-gold" : "text-muted"}`} aria-hidden="true" />
+          <span>
+            <span className="block text-[14px] font-semibold">Öne çıkar</span>
+            <span className="block text-[13px] text-muted">Listenin en üstünde altın çerçeveyle gösterilir.</span>
+          </span>
+        </span>
+        <Toggle on={featured} onChange={setFeatured} label="Öne çıkar" />
+      </label>
 
       <div className="flex flex-wrap gap-2 pt-1">
         <button

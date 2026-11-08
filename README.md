@@ -1,22 +1,33 @@
 # Tiktok Jetonlu Yayın Bulma
 
-Jeton dağıtılan TikTok canlı yayınlarını listeleyen site. Yayınlar ve linkler `/admin` panelinden eklenir; her yayının ana sayfada ne kadar kalacağı panelden ayarlanır, süresi dolan yayın otomatik olarak **Geçmiş** sekmesine geçer.
+Jeton dağıtılan TikTok canlı yayınlarını listeleyen, üyelik anahtarıyla girilen site.
 
 ## Özellikler
-- Animasyonlu açılış (3B dönen jeton), Aktif / Yaklaşan / Geçmiş sekmeleri
-- Kalan süre çubuğu ve canlı geri sayım, sayfa 30 sn'de bir kendini yeniler
-- Admin paneli: anahtar ile giriş, yayın ekle / düzenle / uzat / bitir / sil, ileri tarihli yayın, duyuru metni, geçmiş ayarları
-- Veri Upstash Redis'te (ya da Vercel Blob'da) tek bir JSON kaydı olarak tutulur
+
+**Üyeler için**
+- Siteye üyelik anahtarıyla giriş (`TJ-XXXX-XXXX-XXXX`)
+- Aktif / Yaklaşan / Geçmiş sekmeleri, arama ve sıralama (en yeni, en çok jeton, bitişi yakın)
+- Öne çıkan yayınlar altın çerçeveyle en üstte
+- Kalan süre çubuğu, canlı geri sayım, 30 sn'de bir otomatik yenileme
+- Yeni yayın açılınca sesli bildirim (ve sekme arka plandaysa tarayıcı bildirimi)
+- Üyeliğin kalan süresi üst çubukta
+
+**Admin paneli (`/admin`)**
+- Genel bakış: aktif yayın/üye sayısı, 14 günlük giriş ve tıklama grafikleri, en çok tıklanan yayınlar, etkinlik kaydı
+- Yayınlar: ekle, düzenle, öne çıkar, uzat, bitir, sil; ana sayfada kalma süresi; ileri tarihli yayın; tıklama sayısı
+- Anahtarlar: tek seferde 1-200 anahtar üret; giriş hakkı (1, 3, 5... ya da sınırsız); üyelik süresi (gün ya da süresiz); süre ilk girişte ya da hemen başlar; arama, durum filtresi, CSV dışa aktarma; süre uzatma, hak ekleme, girişleri sıfırlama, oturumları kapatma, devre dışı bırakma
+- Ayarlar: anahtar zorunluluğu, "Anahtar al" linki, duyuru, geçmiş yayın ayarları, bakım modu
+- Hız sınırı: hatalı anahtar denemeleri IP başına sınırlanır
 
 ## Ortam değişkenleri
 | Değişken | Açıklama |
 | --- | --- |
-| `ADMIN_KEY` | Admin paneline giriş anahtarı |
+| `ADMIN_KEY` | Admin paneline giriş anahtarı (zorunlu) |
 | `KV_REST_API_URL`, `KV_REST_API_TOKEN` | Vercel'de Storage > Upstash Redis bağlanınca otomatik eklenir (önerilen) |
-| `BLOB_READ_WRITE_TOKEN` | Redis yerine Vercel Blob kullanılacaksa otomatik eklenir |
-| `BLOB_ACCESS` | İsteğe bağlı. Blob deposu "public" ise `public` yaz (varsayılan `private`) |
+| `BLOB_READ_WRITE_TOKEN` | Redis yerine Vercel Blob kullanılacaksa |
+| `SESSION_SECRET` | İsteğe bağlı. Üye oturumlarını imzalamak için ayrı gizli anahtar (yoksa ADMIN_KEY kullanılır) |
 
-Hiç depolama bağlı değilse yerel geliştirmede veri `.data/db.json` dosyasına yazılır.
+Depolama bağlı değilse yerel geliştirmede veri `.data/kv.json` dosyasına yazılır.
 
 ## Yerelde çalıştırma
 ```bash

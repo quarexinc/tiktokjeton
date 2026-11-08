@@ -1,42 +1,34 @@
-import { NextResponse } from "next/server";
-import { safe } from "@/lib/http";
 import { randomUUID } from "crypto";
-import { isAdmin } from "@/lib/auth";
-import { mutateDB, readDB } from "@/lib/store";
+import { getAccess, isAdmin } from "@/lib/auth";
+import { addLog, getClicks, mutateDB, readDB } from "@/lib/store";
 import { getPublicPayload } from "@/lib/public";
 import { parseStreamInput } from "@/lib/validate";
+import { adminRoute, fail, json, safe } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
 
-/** Herkese açık: ana sayfanın yenilenmesi için. ?all=1 ile admin tüm veriyi alır. */
+/** Ana sayfa yenilemesi (üye ya da admin). ?all=1 ile admin tüm veriyi ve tıklamaları alır. */
 export async function GET(req: Request) {
   return safe(async () => {
-  const all = new URL(req.url).searchParams.get("all") === "1";
-  if (all) {
-    if (!(await isAdmin())) return NextResponse.json({ error: "Giriş gerekli." }, { status: 401 });
-    const db = await readDB();
-    return NextResponse.json({ ...db, now: Date.now() }, { headers: { "Cache-Control": "no-store" } });
-  }
-  const payload = await getPublicPayload();
-  return NextResponse.json(payload, { headers: { "Cache-Control": "no-store" } });
+    if (new URL(req.url).searchParams.get("all") === "1") {
+      if (!(await isAdmin())) return fail("Giriş gerekli.", 401);
+      const [db, clicks] = await Promise.all([readDB(), getClicks()]);
+      return json({ ...db, clicks, now: Date.now() });
+    }
+    const access = await getAccess();
+    if (!access.allowed) return fail("Giriş gerekli.", 401);
+    return json(await getPublicPayload());
   });
 }
 
-export async function POST(req: Request) {
-  return safe(async () => {
-  if (!(await isAdmin())) return NextResponse.json({ error: "Giriş gerekli." }, { status: 401 });
+export const POST = adminRoute(async (req: Request) => {
   const body = await req.json().catch(() => ({}));
   const parsed = parseStreamInput(body);
-  if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
+  if (!parsed.ok) return fail(parsed.error);
 
   const db = await mutateDB((db) => {
-    db.streams.push({
-      ...parsed.value,
-      id: randomUUID(),
-      endedAt: null,
-      createdAt: new Date().toISOString(),
-    });
+    db.streams.push({ ...parsed.value, id: randomUUID(), endedAt: null, createdAt: new Date().toISOString() });
   });
-  return NextResponse.json({ ...db, now: Date.now() });
-  });
-}
+  await addLog("stream_added", `@${parsed.value.username} yayını eklendi`);
+  return json({ ...db, clicks: await getClicks(), now: Date.now() });
+});

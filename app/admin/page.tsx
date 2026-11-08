@@ -1,8 +1,9 @@
 import type { Metadata } from "next";
 import { adminKeyConfigured, isAdmin } from "@/lib/auth";
-import { readDB, storageKind } from "@/lib/store";
+import { getClicks, getOverview, listKeys, readDB, storageKind } from "@/lib/store";
 import Login from "@/components/admin/Login";
-import Dashboard from "@/components/admin/Dashboard";
+import AdminApp, { type AdminState } from "@/components/admin/AdminApp";
+import { DEFAULT_SETTINGS } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = {
@@ -14,17 +15,26 @@ export default async function AdminPage() {
   if (!(await isAdmin())) {
     return <Login configured={adminKeyConfigured()} />;
   }
+
   let storageError: string | null =
     storageKind() === "none"
-      ? "Depolama bağlı değil, eklediğin yayınlar kaydedilemez. Vercel projesinde Storage sekmesinden Upstash Redis bağla ve yeniden yayınla."
+      ? "Depolama bağlı değil: yayınlar ve anahtarlar kaydedilemez. Vercel'de tiktokjeton projesini aç, Storage sekmesinden Upstash Redis'i (ücretsiz) bağla ve projeyi yeniden yayınla."
       : null;
-  let db;
+
+  let state: AdminState;
   try {
-    db = await readDB();
+    const [db, clicks, keys, overview] = await Promise.all([readDB(), getClicks(), listKeys(), getOverview()]);
+    state = { db, clicks, keys, overview, now: Date.now() };
   } catch (e) {
     console.error(e);
     storageError = "Depolamaya ulaşılamadı. Vercel projesindeki Storage bağlantısını kontrol et.";
-    db = { streams: [], settings: { announcement: "", showPast: true, pastLimit: 24 } };
+    state = {
+      db: { streams: [], settings: { ...DEFAULT_SETTINGS } },
+      clicks: {},
+      keys: [],
+      overview: { clicks: {}, log: [], loginsByDay: [], clicksByDay: [], storage: storageKind() },
+      now: Date.now(),
+    };
   }
-  return <Dashboard initial={{ ...db, now: Date.now() }} storageError={storageError} />;
+  return <AdminApp initial={state} storageError={storageError} />;
 }

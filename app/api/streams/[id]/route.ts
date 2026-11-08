@@ -1,9 +1,7 @@
-import { NextResponse } from "next/server";
-import { safe } from "@/lib/http";
-import { isAdmin } from "@/lib/auth";
-import { mutateDB, readDB } from "@/lib/store";
+import { addLog, getClicks, mutateDB, readDB, removeClicks } from "@/lib/store";
 import { parseStreamInput } from "@/lib/validate";
 import { endTime } from "@/lib/status";
+import { adminRoute, fail, json } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
 
@@ -11,23 +9,22 @@ type Ctx = { params: Promise<{ id: string }> };
 
 /**
  * Gövde:
- *  - { action: "end" }            yayını hemen geçmişe taşır
+ *  - { action: "end" }             yayını hemen geçmişe taşır
  *  - { action: "extend", minutes } süreyi uzatır (bitmişse şimdiden itibaren)
- *  - { action: "reopen" }          elle bitirilmiş yayını geri açar
+ *  - { action: "feature", value }  öne çıkarır / kaldırır
  *  - diğer alanlar                  düzenleme
  */
-export async function PATCH(req: Request, { params }: Ctx) {
-  return safe(async () => {
-  if (!(await isAdmin())) return NextResponse.json({ error: "Giriş gerekli." }, { status: 401 });
+export const PATCH = adminRoute(async (req: Request, { params }: Ctx) => {
   const { id } = await params;
   const body = await req.json().catch(() => ({}));
 
   const current = await readDB();
   const stream = current.streams.find((s) => s.id === id);
-  if (!stream) return NextResponse.json({ error: "Yayın bulunamadı." }, { status: 404 });
+  if (!stream) return fail("Yayın bulunamadı.", 404);
 
   const now = Date.now();
   let error: string | null = null;
+  let logMsg = `@${stream.username} yayını düzenlendi`;
 
   const db = await mutateDB((db) => {
     const s = db.streams.find((x) => x.id === id);
@@ -35,10 +32,12 @@ export async function PATCH(req: Request, { params }: Ctx) {
 
     if (body.action === "end") {
       s.endedAt = new Date(now).toISOString();
+      logMsg = `@${s.username} yayını bitirildi`;
       return;
     }
-    if (body.action === "reopen") {
-      s.endedAt = null;
+    if (body.action === "feature") {
+      s.featured = Boolean(body.value);
+      logMsg = `@${s.username} ${s.featured ? "öne çıkarıldı" : "öne çıkanlardan kaldırıldı"}`;
       return;
     }
     if (body.action === "extend") {
@@ -48,10 +47,10 @@ export async function PATCH(req: Request, { params }: Ctx) {
         return;
       }
       const start = new Date(s.startsAt).getTime();
-      const end = endTime(s);
-      const base = Math.max(end, now);
+      const base = Math.max(endTime(s), now);
       s.endedAt = null;
       s.durationMin = Math.ceil((base + minutes * 60_000 - start) / 60_000);
+      logMsg = `@${s.username} yayını ${minutes} dk uzatıldı`;
       return;
     }
 
@@ -63,18 +62,19 @@ export async function PATCH(req: Request, { params }: Ctx) {
     Object.assign(s, parsed.value);
   });
 
-  if (error) return NextResponse.json({ error }, { status: 400 });
-  return NextResponse.json({ ...db, now: Date.now() });
-  });
-}
+  if (error) return fail(error);
+  await addLog("stream_updated", logMsg);
+  return json({ ...db, clicks: await getClicks(), now: Date.now() });
+});
 
-export async function DELETE(_req: Request, { params }: Ctx) {
-  return safe(async () => {
-  if (!(await isAdmin())) return NextResponse.json({ error: "Giriş gerekli." }, { status: 401 });
+export const DELETE = adminRoute(async (_req: Request, { params }: Ctx) => {
   const { id } = await params;
+  let name = "";
   const db = await mutateDB((db) => {
+    name = db.streams.find((s) => s.id === id)?.username ?? "";
     db.streams = db.streams.filter((s) => s.id !== id);
   });
-  return NextResponse.json({ ...db, now: Date.now() });
-  });
-}
+  await removeClicks(id);
+  await addLog("stream_deleted", `@${name} yayını silindi`);
+  return json({ ...db, clicks: await getClicks(), now: Date.now() });
+});
