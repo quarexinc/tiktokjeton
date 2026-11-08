@@ -15,9 +15,9 @@ TikTok'ta tüm canlı yayınları listeleyen açık bir servis yok ve aynı anda
 
    Bir yayından onlarca yeni yayıncı çıkar. Sıralamalar bölgesel olduğu için bot Türkiye yayınlarından başlarsa ağırlıklı olarak Türkiye'de kalır.
 3. **Doğrulama:** Havuzdaki hesapların açık olup olmadığını TikTok'un toplu oda kontrolüyle doğrular (tek istekte 20 oda).
-4. **Yoklama:** Canlı olanlara sırayla 2 dakika bağlanır ve sandık olup olmadığına bakar.
-5. **Tutma:** Sandık görürse yayını siteye ekler, sandıklar bitene kadar bağlı kalır ve jeton miktarını, sandık sayısını, geri sayımı günceller. Görmezse bağlantıyı kapatıp sıradakine geçer.
-6. **Öğrenme:** Sandık görülen hesaplar havuzda öne çıkar ve 6 dakikada bir yoklanır. Diğerleri 25 dakikada bir yoklanır.
+4. **Yoklama:** Canlı olanlara aynı anda 60'a kadar bağlanır, her birine 1 dakika bakar. Sırası gelen hesap kalmasa bile en uzun süredir bakılmayanlardan devam eder; tarama hiç durmaz.
+5. **Tutma:** Sandık görürse yayını siteye ekler ve ayrı bir takip yuvasına alır; arama yuvası anında sıradaki yayına geçer. Takipteki yayında sandıklar bitene kadar kalır ve jeton miktarını, sandık sayısını, geri sayımı günceller. Görmezse bağlantıyı kapatıp sıradakine geçer.
+6. **Öğrenme:** Sandık görülen hesaplar havuzda öne çıkar ve 4 dakikada bir yoklanır. Diğerleri 15 dakikada bir yoklanır.
 
 Havuz `kesif.db` dosyasında saklanır; bot yeniden başlasa da öğrendiklerini unutmaz.
 
@@ -78,16 +78,19 @@ Bot artık sistem servisi olarak çalışır. Çökerse ya da sunucu yeniden ba�
 | --- | --- | --- |
 | `site_url` | | Sitenin adresi |
 | `api_key` | | Admin paneli > Otomasyon'dan alınan bot anahtarı |
+| `region` | `TR` | TikTok'a hangi ülkeden bağlanıyor gibi görüneceği (canlı sayfası ve akış buna göre yayın gösterir) |
 | `discovery` | `true` | Otomatik keşif |
-| `feed_discovery` | `true` | TikTok canlı akışından tohum çekmeyi dene (deneysel) |
+| `feed_discovery` | `true` | TikTok canlı yayınlar sayfasından ve akışından tohum çekme |
 | `seed_usernames` | `[]` | İsteğe bağlı başlangıç hesapları |
-| `max_connections` | `40` | Aynı anda en fazla kaç yayına bağlı kalınacağı |
-| `probe_seconds` | `120` | Bir yayında sandık için kaç saniye bekleneceği |
+| `max_connections` | `60` | Aynı anda aranan (yoklanan) yayın sayısı |
+| `max_hold` | `60` | Sandık bulunup takip edilen yayın sayısı; aramayı yavaşlatmaz |
+| `parallel_starts` | `8` | Aynı anda açılan bağlantı sayısı |
+| `probe_seconds` | `60` | Bir yayında sandık için kaç saniye bakılacağı |
 | `linger_minutes` | `8` | Sandık bitince yayında kaç dakika daha kalınacağı |
-| `start_interval_sec` | `2` | İki bağlantı arasındaki bekleme |
-| `probe_cooldown_min` | `25` | Sandık görülmeyen hesabın yeniden yoklanma aralığı |
-| `hot_cooldown_min` | `6` | Daha önce sandık görülen hesabın yeniden yoklanma aralığı |
-| `pinned_check_sec` | `120` | İzleme listesindeki hesapların kontrol aralığı |
+| `start_interval_sec` | `0.3` | Bağlantı grupları arasındaki bekleme |
+| `probe_cooldown_min` | `15` | Sandık görülmeyen hesabın yeniden yoklanma aralığı |
+| `hot_cooldown_min` | `4` | Daha önce sandık görülen hesabın yeniden yoklanma aralığı |
+| `pinned_check_sec` | `90` | Öncelikli hesapların kontrol aralığı |
 | `pool_max` | `30000` | Havuzda tutulacak en fazla hesap |
 | `sign_api_key` | | Euler Stream imza anahtarı (aşağıya bak) |
 | `proxy` | | `http://kullanici:sifre@sunucu:port` |

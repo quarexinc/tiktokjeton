@@ -45,7 +45,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import httpx
 
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 BASE_DIR = Path(__file__).resolve().parent
 
 # ----------------------------------------------------------------------------
@@ -133,15 +133,18 @@ class Config:
     feed_discovery: bool = True
     seed_usernames: List[str] = field(default_factory=list)
     extra_usernames: List[str] = field(default_factory=list)  # eski sürümle uyum: tohum gibi davranır
+    region: str = "TR"
     # Bağlantılar
-    max_connections: int = 40
-    probe_seconds: int = 120
+    max_connections: int = 60  # aynı anda yoklanan (aranan) yayın sayısı
+    max_hold: int = 60  # sandık bulunup takip edilen yayın sayısı (aramayı yavaşlatmaz)
+    parallel_starts: int = 8
+    probe_seconds: int = 60
     linger_minutes: int = 8
-    start_interval_sec: float = 2.0
+    start_interval_sec: float = 0.3
     # Yeniden yoklama aralıkları (dakika)
-    probe_cooldown_min: int = 25
-    hot_cooldown_min: int = 6
-    pinned_check_sec: int = 120
+    probe_cooldown_min: int = 15
+    hot_cooldown_min: int = 4
+    pinned_check_sec: int = 90
     # Havuz
     pool_max: int = 30000
     data_file: str = "kesif.db"
@@ -169,6 +172,9 @@ class Config:
         cfg.seed_usernames = [u for u in map(clean_username, cfg.seed_usernames + cfg.extra_usernames) if u]
         cfg.max_connections = max(1, int(cfg.max_connections))
         cfg.probe_seconds = max(30, int(cfg.probe_seconds))
+        cfg.parallel_starts = max(1, min(20, int(cfg.parallel_starts)))
+        cfg.max_hold = max(1, int(cfg.max_hold))
+        cfg.region = (cfg.region or "TR").upper()[:2]
         cfg.pinned_check_sec = max(30, int(cfg.pinned_check_sec))
         return cfg
 
@@ -323,6 +329,16 @@ class Pool:
                         last_live DESC
                LIMIT ?""",
             (now, now, limit + len(exclude)),
+        ).fetchall()
+        return [r for r in rows if r["username"] not in exclude][:limit]
+
+    def backlog(self, now: float, exclude: Set[str], limit: int, min_gap: float = 300) -> List[sqlite3.Row]:
+        """Sırası gelmemiş ama en az min_gap sn önce bakılmış hesaplar: tarama hiç durmasın diye."""
+        rows = self.db.execute(
+            """SELECT * FROM accounts WHERE next_check > ? AND last_probe < ? AND next_check < ?
+               ORDER BY (chest_hits > 0) DESC, (room_id IS NOT NULL) DESC, last_probe ASC
+               LIMIT ?""",
+            (now, now - min_gap, now + 6 * 3600, limit + len(exclude)),
         ).fetchall()
         return [r for r in rows if r["username"] not in exclude][:limit]
 
@@ -613,6 +629,7 @@ class Session:
         from TikTokLive import events as ev
 
         client = TikTokLiveClient(unique_id=f"@{self.username}", **self.bot.client_kwargs())
+        apply_region(client.web, self.bot.cfg.region)
         self.client = client
 
         async def on_connect(_: Any) -> None:
@@ -659,8 +676,8 @@ class Session:
     def _discovery_handler(self, name: str, source: str):
         async def handler(event: Any) -> None:
             now = time.time()
-            # Aynı türden mesajı en fazla 10 sn'de bir işle
-            if now - self._discovery_at.get(name, 0) < 10:
+            # Aynı türden mesajı en fazla 3 sn'de bir işle
+            if now - self._discovery_at.get(name, 0) < 3:
                 return
             self._discovery_at[name] = now
             try:
@@ -706,7 +723,8 @@ class Session:
                     f"{chest.people} kişi, {wait // 60} dk {wait % 60} sn sonra açılıyor"
                 )
                 if self.mode == "probe":
-                    self.mode = "hold"
+                    self.mode = "hold"  # arama yuvası anında bir sonraki yayına açılır
+                    self.bot.on_hold(self)
         self.schedule_report()
 
     def schedule_report(self, delay: float = 2.0) -> None:
@@ -771,7 +789,35 @@ class Session:
 # ----------------------------------------------------------------------------
 
 FEED_URL = "https://webcast.tiktok.com/webcast/feed/"
-LIVE_PAGE_URL = "https://www.tiktok.com/live"
+LIVE_PAGE_URL = "https://www.tiktok.com/live?lang=tr-TR"
+
+
+REGIONS = {
+    "TR": ("tr", "tr-TR", "Europe/Istanbul"),
+    "AZ": ("az", "az-AZ", "Asia/Baku"),
+    "DE": ("de", "de-DE", "Europe/Berlin"),
+    "US": ("en", "en-US", "America/New_York"),
+    "GB": ("en", "en-GB", "Europe/London"),
+}
+
+
+def apply_region(web: Any, region: str) -> None:
+    """TikTok'a Türkiye'den bağlanan bir kullanıcı gibi görün; canlı sayfası ve akış bölgeye göre yayın gösterir."""
+    lang, lang_country, tz = REGIONS.get(region, ("tr", "tr-TR", "Europe/Istanbul"))
+    try:
+        web.params.update(
+            {
+                "app_language": lang,
+                "browser_language": lang_country,
+                "webcast_language": lang,
+                "priority_region": region,
+                "region": region,
+                "tz_name": tz,
+            }
+        )
+        web.headers["Accept-Language"] = f"{lang_country},{lang};q=0.9"
+    except Exception:
+        pass
 
 
 class Bot:
@@ -783,7 +829,7 @@ class Bot:
         self.starting: Set[str] = set()
         self.stopping = asyncio.Event()
         self._web_client: Any = None
-        self._web_lock = asyncio.Semaphore(2)
+        self._web_lock = asyncio.Semaphore(4)
         self.pinned: Set[str] = set()
         self.seeds: Set[str] = set(cfg.seed_usernames)
         self.counters = {"probed": 0, "added": 0, "discovered": 0, "checks": 0, "check_errors": 0}
@@ -804,12 +850,13 @@ class Bot:
             from TikTokLive import TikTokLiveClient
 
             self._web_client = TikTokLiveClient(unique_id="tiktok", **self.client_kwargs())
+            apply_region(self._web_client.web, self.cfg.region)
         return self._web_client.web
 
     async def rooms_alive(self, room_ids: List[int]) -> List[bool]:
         async with self._web_lock:
             res = await self.web().fetch_is_live.fetch_is_live_room_ids(*room_ids)
-            await asyncio.sleep(random.uniform(0.5, 1.2))
+            await asyncio.sleep(random.uniform(0.2, 0.6))
             return [bool(x) for x in res]
 
     async def user_live(self, username: str) -> Tuple[bool, Optional[int]]:
@@ -818,7 +865,7 @@ class Bot:
 
         async with self._web_lock:
             data = await FetchRoomIdAPIRoute.fetch_user_room_data(web=self.web(), unique_id=username)
-            await asyncio.sleep(random.uniform(0.8, 2.0))
+            await asyncio.sleep(random.uniform(0.3, 0.8))
         d = data.get("data") or {}
         room = str((d.get("user") or {}).get("roomId") or "")
         status = (d.get("liveRoom") or {}).get("status")
@@ -950,6 +997,15 @@ class Bot:
         finally:
             self.starting.discard(username)
 
+    def on_hold(self, s: "Session") -> None:
+        holding = [x for x in self.sessions.values() if x.mode == "hold" and x is not s]
+        if len(holding) < self.cfg.max_hold:
+            return
+        # Tutma kapasitesi dolu: açık sandığı kalmamış en eski yayını bırak
+        idle = sorted((x for x in holding if not x.state.chests), key=lambda x: x.state.last_chest_at)
+        if idle:
+            asyncio.ensure_future(self.close_session(idle[0], "yer açmak için bırakıldı"))
+
     def _note_tiktok_error(self, name: str, msg: str) -> None:
         text = f"{name} {msg}".lower()
         if any(k in text for k in ("rate", "429", "limit", "captcha", "sign")):
@@ -985,7 +1041,7 @@ class Bot:
                 await self._schedule_once()
             except Exception as e:
                 log.warning(f"Zamanlayıcı hatası: {type(e).__name__}: {e}")
-            await self._sleep(3)
+            await self._sleep(2)
 
     async def _schedule_once(self) -> None:
         now = time.time()
@@ -998,12 +1054,17 @@ class Bot:
             return
         if self.cfg.discovery:
             await self.process_leads(now)
-        free = self.cfg.max_connections - len(self.sessions) - len(self.starting)
+        probing = sum(1 for s in self.sessions.values() if s.mode == "probe")
+        free = self.cfg.max_connections - probing - len(self.starting)
         if free <= 0:
             return
 
         busy = set(self.sessions) | self.starting
-        cands = self.pool.candidates(now, busy, limit=min(60, free * 3))
+        cands = self.pool.candidates(now, busy, limit=min(250, free * 4))
+        if len(cands) < free * 2:
+            # Sırası gelen az: boşta kalma, en uzun süredir bakılmayanlarla devam et
+            seen = busy | {r["username"] for r in cands}
+            cands += self.pool.backlog(now, seen, limit=free * 2 - len(cands))
         if not cands:
             return
 
@@ -1012,8 +1073,8 @@ class Bot:
         live: List[Tuple[str, Optional[int]]] = []
 
         # Oda numarası bilinenleri toplu doğrula
-        for i in range(0, len(with_room), 20):
-            chunk = with_room[i : i + 20]
+        for i in range(0, len(with_room), 50):
+            chunk = with_room[i : i + 50]
             try:
                 alive = await self.rooms_alive([int(r["room_id"]) for r in chunk])
                 self.counters["checks"] += 1
@@ -1030,8 +1091,8 @@ class Bot:
                 else:
                     self.pool.mark_offline(r["username"], now, self.cfg)
 
-        # Oda numarası bilinmeyenleri tek tek (yavaş) kontrol et
-        for r in without[:3]:
+        # Oda numarası bilinmeyenleri paralel kontrol et
+        async def check_user(r: sqlite3.Row) -> None:
             try:
                 ok, room = await self.user_live(r["username"])
                 self.counters["checks"] += 1
@@ -1043,21 +1104,26 @@ class Bot:
                 else:
                     self.pool.schedule(r["username"], now + 900)
                     self._note_tiktok_error(type(e).__name__, str(e))
-                continue
+                return
             if ok:
                 self.pool.add(r["username"], room, r["source"] or "liste", True, now)
                 live.append((r["username"], room))
             else:
                 self.pool.mark_offline(r["username"], now, self.cfg)
-        for r in without[3:]:
+
+        await asyncio.gather(*(check_user(r) for r in without[:8]))
+        for r in without[8:]:
             self.pool.schedule(r["username"], now + random.uniform(30, 120))
         self.pool.commit()
 
-        for username, room in live[:free]:
+        todo = live[:free]
+        for username, _ in todo:
+            self.pool.schedule(username, now + 3600)  # Bağlıyken tekrar seçilmesin
+        step = self.cfg.parallel_starts
+        for i in range(0, len(todo), step):
             if self.stopping.is_set():
                 break
-            self.pool.schedule(username, now + 3600)  # Bağlıyken tekrar seçilmesin
-            await self.start_session(username, room)
+            await asyncio.gather(*(self.start_session(u, room) for u, room in todo[i : i + step]))
             await asyncio.sleep(self.cfg.start_interval_sec)
         for username, _ in live[free:]:
             self.pool.schedule(username, now + 20)  # Yer açılınca öncelikli
@@ -1086,23 +1152,24 @@ class Bot:
             await self._sleep(self.cfg.heartbeat_sec)
 
     async def discovery_loop(self) -> None:
-        await self._sleep(5)  # Önce siteden tohumlar gelsin
+        await self._sleep(2)  # Önce siteden tohumlar gelsin
         warned = False
         while not self.stopping.is_set():
-            wait = 600
+            pool_size = self.pool.stats(time.time())["pool"]
+            wait = 120 if pool_size < 300 else 600
             if self.cfg.discovery:
-                empty = not self.sessions and self.pool.stats(time.time())["pool"] == 0
+                empty = not self.sessions and pool_size == 0
                 found = await self.feed_discovery(loud=empty)
                 removed = self.pool.prune(self.cfg.pool_max, time.time())
                 if removed:
                     log.debug(f"Havuzdan {removed} eski hesap silindi")
                 self.pool.commit()
                 if empty and not found:
-                    wait = 120
+                    wait = 60
                     if not warned:
                         warned = True
                         log.warning(
-                            "Keşif havuzu boş, bot 2 dakikada bir tohum aramaya devam edecek. Hızlandırmak için admin panelinde "
+                            "Keşif havuzu boş, bot dakikada bir tohum aramaya devam edecek. Hızlandırmak için admin panelinde "
                             "Otomasyon > Öncelikli hesaplar'a şu an canlı olan 1-2 TikTok hesabı yaz; bot oradan kendisi yayılır."
                         )
             await self._sleep(wait)
@@ -1113,13 +1180,13 @@ class Bot:
             st = self.status()
             log.info(
                 f"{C['dim']}Durum: havuz {st['pool']} hesap ({st['discoveredToday']} bugün), "
-                f"{st['connected']} yayına bağlı ({st['holding']} sandıklı), "
+                f"{st['probing']} yayın aranıyor, {st['holding']} sandıklı yayın takipte, "
                 f"bu oturumda {self.counters['probed']} yayın yoklandı, {self.counters['added']} siteye eklendi{C['reset']}"
             )
 
     def status(self) -> dict:
         st = self.pool.stats(time.time())
-        holding = sum(1 for s in self.sessions.values() if s.state.chests)
+        holding = sum(1 for s in self.sessions.values() if s.mode == "hold")
         return {
             "watching": st["pool"],
             "live": len(self.sessions),
@@ -1141,8 +1208,8 @@ class Bot:
     async def run(self) -> None:
         log.info(f"{C['gold']}Tiktok Jetonlu Yayın Bulma botu {VERSION}{C['reset']} başlıyor, site: {self.cfg.site_url}")
         log.info(
-            f"Keşif {'açık' if self.cfg.discovery else 'kapalı'}, en fazla {self.cfg.max_connections} eş zamanlı bağlantı, "
-            f"yoklama süresi {self.cfg.probe_seconds} sn"
+            f"Keşif {'açık' if self.cfg.discovery else 'kapalı'}, bölge {self.cfg.region}, aynı anda {self.cfg.max_connections} yayın aranır "
+            f"(+{self.cfg.max_hold} sandıklı yayın takibi), her yayına {self.cfg.probe_seconds} sn bakılır"
         )
         loops = [
             asyncio.ensure_future(self.heartbeat_loop()),
