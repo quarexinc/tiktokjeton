@@ -54,7 +54,7 @@ if not exist config.json (
   set /p "SITE_IN=  Site adresi [https://tiktokjeton.vercel.app]: "
   if defined SITE_IN set "SITE=!SITE_IN!"
   set /p "KEY=  API anahtari (tjb_ ile baslar): "
-  powershell -NoProfile -Command "$c = Get-Content 'config.example.json' -Raw -Encoding UTF8; $c = $c.Replace('BURAYA_API_ANAHTARI', $env:KEY).Replace('https://tiktokjeton.vercel.app', $env:SITE); [IO.File]::WriteAllText((Join-Path (Get-Location) 'config.json'), $c, (New-Object Text.UTF8Encoding $false))"
+  powershell -NoProfile -Command "$c = Get-Content 'config.example.json' -Raw -Encoding UTF8; $k = ($env:KEY -replace '\s','').Trim([char]34, [char]39); $u = $env:SITE.Trim().TrimEnd('/'); $c = $c.Replace('BURAYA_API_ANAHTARI', $k).Replace('https://tiktokjeton.vercel.app', $u); [IO.File]::WriteAllText((Join-Path (Get-Location) 'config.json'), $c, (New-Object Text.UTF8Encoding $false))"
 ) else (
   echo  [3/5] config.json zaten var, kullaniliyor.
 )
@@ -64,8 +64,7 @@ echo  [4/5] Site baglantisi deneniyor...
 ".venv\Scripts\python.exe" tiktok_jeton_bot.py --test
 if errorlevel 1 (
   echo.
-  echo  [!] Siteye baglanilamadi. config.json dosyasindaki site_url ve api_key degerlerini duzelt
-  echo      ^(notepad config.json^) ve KURULUM.bat dosyasini tekrar calistir.
+  echo  [!] Siteye baglanilamadi. Yukaridaki hata mesajina bak, sonra ANAHTAR-GIR.bat ile anahtari tekrar gir.
   pause & exit /b 1
 )
 
@@ -83,6 +82,7 @@ echo  ==============================================
 echo   DURUM.bat    : canli kaydi izle
 echo   DURDUR.bat   : botu durdur
 echo   BASLAT.bat   : botu tekrar baslat
+echo   ANAHTAR-GIR.bat : API anahtarini degistir
 echo   Sunucu yeniden baslasa da bot kendiliginden acilir.
 echo   Admin panelinde Otomasyon sekmesinde "Calisiyor" yazmali.
 echo.

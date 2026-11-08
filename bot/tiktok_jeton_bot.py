@@ -45,7 +45,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import httpx
 
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 BASE_DIR = Path(__file__).resolve().parent
 
 # ----------------------------------------------------------------------------
@@ -133,7 +133,8 @@ class Config:
     feed_discovery: bool = True
     seed_usernames: List[str] = field(default_factory=list)
     extra_usernames: List[str] = field(default_factory=list)  # eski sürümle uyum: tohum gibi davranır
-    region: str = "TR"
+    regions: List[str] = field(default_factory=lambda: ["TR", "SA", "GB"])
+    region: str = ""  # eski sürümlerden kalan ayar, kullanılmıyor
     # Bağlantılar
     max_connections: int = 60  # aynı anda yoklanan (aranan) yayın sayısı
     max_hold: int = 60  # sandık bulunup takip edilen yayın sayısı (aramayı yavaşlatmaz)
@@ -160,7 +161,8 @@ class Config:
     def load(cls, path: Path) -> "Config":
         data: Dict[str, Any] = {}
         if path.exists():
-            data = json.loads(path.read_text(encoding="utf-8"))
+            # utf-8-sig: Not Defteri'nin eklediği görünmez BOM işaretini yok sayar
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
         data["site_url"] = os.environ.get("TJ_SITE_URL", data.get("site_url", ""))
         data["api_key"] = os.environ.get("TJ_API_KEY", data.get("api_key", ""))
         # Eski ayar adı
@@ -168,13 +170,14 @@ class Config:
             data["pinned_check_sec"] = data["check_interval_sec"]
         known = set(cls.__dataclass_fields__)
         cfg = cls(**{k: v for k, v in data.items() if k in known})
-        cfg.site_url = cfg.site_url.rstrip("/")
+        cfg.site_url = str(cfg.site_url or "").strip().strip('"').strip().rstrip("/")
+        cfg.api_key = "".join(str(cfg.api_key or "").split()).strip('"').strip("'")
         cfg.seed_usernames = [u for u in map(clean_username, cfg.seed_usernames + cfg.extra_usernames) if u]
         cfg.max_connections = max(1, int(cfg.max_connections))
         cfg.probe_seconds = max(30, int(cfg.probe_seconds))
         cfg.parallel_starts = max(1, min(20, int(cfg.parallel_starts)))
         cfg.max_hold = max(1, int(cfg.max_hold))
-        cfg.region = (cfg.region or "TR").upper()[:2]
+        cfg.regions = [str(r).strip().upper()[:2] for r in (cfg.regions or []) if str(r).strip()] or ["TR", "SA", "GB"]
         cfg.pinned_check_sec = max(30, int(cfg.pinned_check_sec))
         return cfg
 
@@ -193,6 +196,7 @@ class Config:
 
 class SiteAPI:
     def __init__(self, cfg: Config):
+        self.key_hint = cfg.api_key[-4:]
         self.http = httpx.AsyncClient(
             base_url=cfg.site_url,
             headers={"Authorization": f"Bearer {cfg.api_key}", "User-Agent": f"tiktok-jeton-bot/{VERSION}"},
@@ -207,7 +211,10 @@ class SiteAPI:
                     r = await self.http.post(path, json=body)
                 data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
                 if r.status_code == 401:
-                    log.error(f"Site API anahtarını kabul etmedi: {data.get('error', '')}")
+                    log.error(
+                        f"Site API anahtarını kabul etmedi ({data.get('error', '')}). "
+                        f"Kullanılan anahtar ...{self.key_hint} ile bitiyor; ANAHTAR-GIR.bat ile yeniden gir."
+                    )
                     return None
                 if r.status_code >= 500 or r.status_code == 429:
                     raise httpx.HTTPStatusError(str(data.get("error", r.status_code)), request=r.request, response=r)
@@ -629,7 +636,7 @@ class Session:
         from TikTokLive import events as ev
 
         client = TikTokLiveClient(unique_id=f"@{self.username}", **self.bot.client_kwargs())
-        apply_region(client.web, self.bot.cfg.region)
+        apply_region(client.web, self.bot.cfg.regions[0])
         self.client = client
 
         async def on_connect(_: Any) -> None:
@@ -789,11 +796,13 @@ class Session:
 # ----------------------------------------------------------------------------
 
 FEED_URL = "https://webcast.tiktok.com/webcast/feed/"
-LIVE_PAGE_URL = "https://www.tiktok.com/live?lang=tr-TR"
+LIVE_PAGE_URL = "https://www.tiktok.com/live"
 
 
 REGIONS = {
     "TR": ("tr", "tr-TR", "Europe/Istanbul"),
+    "SA": ("ar", "ar-SA", "Asia/Riyadh"),
+    "AE": ("ar", "ar-AE", "Asia/Dubai"),
     "AZ": ("az", "az-AZ", "Asia/Baku"),
     "DE": ("de", "de-DE", "Europe/Berlin"),
     "US": ("en", "en-US", "America/New_York"),
@@ -803,7 +812,7 @@ REGIONS = {
 
 def apply_region(web: Any, region: str) -> None:
     """TikTok'a Türkiye'den bağlanan bir kullanıcı gibi görün; canlı sayfası ve akış bölgeye göre yayın gösterir."""
-    lang, lang_country, tz = REGIONS.get(region, ("tr", "tr-TR", "Europe/Istanbul"))
+    lang, lang_country, tz = REGIONS.get(region, ("en", "en-US", "UTC"))
     try:
         web.params.update(
             {
@@ -829,6 +838,7 @@ class Bot:
         self.starting: Set[str] = set()
         self.stopping = asyncio.Event()
         self._web_client: Any = None
+        self._region_clients: Dict[str, Any] = {}
         self._web_lock = asyncio.Semaphore(4)
         self.pinned: Set[str] = set()
         self.seeds: Set[str] = set(cfg.seed_usernames)
@@ -850,8 +860,20 @@ class Bot:
             from TikTokLive import TikTokLiveClient
 
             self._web_client = TikTokLiveClient(unique_id="tiktok", **self.client_kwargs())
-            apply_region(self._web_client.web, self.cfg.region)
+            apply_region(self._web_client.web, self.cfg.regions[0])
         return self._web_client.web
+
+    def region_web(self, region: str) -> Any:
+        """Her bölge için ayrı istemci: canlı sayfası ve akış o ülkeye göre yayın gösterir."""
+        if region == self.cfg.regions[0]:
+            return self.web()
+        if region not in self._region_clients:
+            from TikTokLive import TikTokLiveClient
+
+            c = TikTokLiveClient(unique_id="tiktok", **self.client_kwargs())
+            apply_region(c.web, region)
+            self._region_clients[region] = c
+        return self._region_clients[region].web
 
     async def rooms_alive(self, room_ids: List[int]) -> List[bool]:
         async with self._web_lock:
@@ -923,16 +945,17 @@ class Bot:
                 self.pool.mark_hot(name, now + 600, now)
         self.pool.commit()
 
-    async def _try_live_page(self) -> Dict[str, Optional[int]]:
+    async def _try_live_page(self, region: str) -> Dict[str, Optional[int]]:
+        lang = REGIONS.get(region, ("en", "en-US", "UTC"))[1]
         async with self._web_lock:
-            r = await self.web().get(url=LIVE_PAGE_URL, base_params=False)
+            r = await self.region_web(region).get(url=f"{LIVE_PAGE_URL}?lang={lang}", base_params=False)
         if r.status_code != 200:
             raise ValueError(f"HTTP {r.status_code}")
         return extract_from_html(r.text)
 
-    async def _try_feed(self) -> Dict[str, Optional[int]]:
+    async def _try_feed(self, region: str) -> Dict[str, Optional[int]]:
         async with self._web_lock:
-            r = await self.web().get(
+            r = await self.region_web(region).get(
                 url=FEED_URL,
                 extra_params={"channel_id": "86", "content_type": "0", "req_from": "feed_loadmore", "max_time": "0"},
                 sign_url=True,
@@ -947,16 +970,19 @@ class Bot:
             return 0
         total = 0
         errors = []
-        for label, fn in (("canlı yayınlar sayfası", self._try_live_page), ("canlı akış", self._try_feed)):
+        jobs = [
+            (f"{reg} canlı yayınlar sayfası", self._try_live_page, reg) for reg in self.cfg.regions
+        ] + [(f"{reg} canlı akış", self._try_feed, reg) for reg in self.cfg.regions]
+        for label, fn, reg in jobs:
             try:
-                found = await fn()
+                found = await fn(reg)
             except Exception as e:
                 errors.append(f"{label}: {type(e).__name__} {str(e)[:120]}")
                 continue
             if found:
                 self.discovered(found, "akış")
                 total += len(found)
-                (log.info if loud else log.debug)(f"{label.capitalize()} üzerinden {len(found)} canlı yayın bulundu")
+                (log.info if loud else log.debug)(f"{label} üzerinden {len(found)} canlı yayın bulundu")
             else:
                 errors.append(f"{label}: yayın verisi yok")
         self.pool.commit()
@@ -1208,7 +1234,7 @@ class Bot:
     async def run(self) -> None:
         log.info(f"{C['gold']}Tiktok Jetonlu Yayın Bulma botu {VERSION}{C['reset']} başlıyor, site: {self.cfg.site_url}")
         log.info(
-            f"Keşif {'açık' if self.cfg.discovery else 'kapalı'}, bölge {self.cfg.region}, aynı anda {self.cfg.max_connections} yayın aranır "
+            f"Keşif {'açık' if self.cfg.discovery else 'kapalı'}, bölgeler {', '.join(self.cfg.regions)}, aynı anda {self.cfg.max_connections} yayın aranır "
             f"(+{self.cfg.max_hold} sandıklı yayın takibi), her yayına {self.cfg.probe_seconds} sn bakılır"
         )
         loops = [
@@ -1234,16 +1260,42 @@ class Bot:
 
 
 async def cmd_test(cfg: Config) -> int:
-    api = SiteAPI(cfg)
-    log.info(f"Siteye bağlanılıyor: {cfg.site_url}")
-    conf = await api.heartbeat({"watching": 0, "live": 0, "connected": 0})
-    await api.close()
-    if conf is None:
-        log.error("Bağlantı başarısız. site_url ve api_key değerlerini kontrol et.")
+    hint = f"...{cfg.api_key[-4:]}" if len(cfg.api_key) >= 4 else "(boş)"
+    log.info(f"Siteye bağlanılıyor: {cfg.site_url}  (anahtar {len(cfg.api_key)} karakter, sonu {hint})")
+    if not cfg.api_key.startswith("tjb_"):
+        log.warning("Anahtar 'tjb_' ile başlamıyor. Admin paneli > Otomasyon'dan oluşturulan bot anahtarını kullan (admin giriş anahtarı değil).")
+    try:
+        async with httpx.AsyncClient(timeout=25) as http:
+            r = await http.post(
+                f"{cfg.site_url}/api/bot/heartbeat",
+                json={"watching": 0, "live": 0, "connected": 0, "version": VERSION, "host": socket.gethostname()[:60]},
+                headers={"Authorization": f"Bearer {cfg.api_key}", "User-Agent": f"tiktok-jeton-bot/{VERSION}"},
+            )
+    except Exception as e:
+        log.error(f"Siteye hiç ulaşılamadı: {type(e).__name__}: {e}")
+        log.error("İnternet bağlantısını, site_url değerini ve VDS'in güvenlik duvarını kontrol et.")
         return 1
+    try:
+        data = r.json()
+    except ValueError:
+        data = {}
+    if r.status_code == 401:
+        log.error(f"Site anahtarı kabul etmedi (401): {data.get('error', '')}")
+        log.error(
+            f"Admin paneli > Otomasyon > API anahtarı bölümünde '…XXXX ile bitiyor' yazan değer {hint} olmalı. "
+            "Değilse yeni anahtar oluşturup ANAHTAR-GIR.bat ile gir."
+        )
+        return 1
+    if r.status_code == 404:
+        log.error(f"Adres bulunamadı (404). site_url yanlış olabilir: {cfg.site_url}")
+        return 1
+    if r.status_code >= 400 or not data.get("config"):
+        log.error(f"Site hata döndürdü ({r.status_code}): {data.get('error') or r.text[:200]}")
+        return 1
+    conf = data["config"]
     log.info(f"{C['green']}Bağlantı başarılı.{C['reset']} Admin panelinde bot 'Çalışıyor' görünmeli.")
     log.info(
-        f"İzleme listesi: {len(conf.get('watchlist', []))} hesap, sitedeki bilinen yayıncılar: {len(conf.get('knownUsernames', []))}. "
+        f"Öncelikli hesap: {len(conf.get('watchlist', []))}, sitedeki bilinen yayıncı: {len(conf.get('knownUsernames', []))}. "
         f"Onaysız yayınla: {'açık' if conf.get('autoPublish') else 'kapalı'}"
     )
     return 0
